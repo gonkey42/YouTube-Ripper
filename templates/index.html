@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Ripper</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="card">
+        <h1>YouTube Ripper</h1>
+        <p class="subtitle">Extract audio &amp; transcripts from YouTube videos</p>
+
+        <form id="rip-form">
+            <label class="field-label" for="url">YouTube URL</label>
+            <input type="text" id="url" name="url" placeholder="Paste YouTube URL here..." autocomplete="off" required>
+
+            <div class="mode-group">
+                <label class="field-label">Output Mode</label>
+                <div class="mode-options">
+                    <label><input type="radio" name="mode" value="audio"> Audio Only</label>
+                    <label><input type="radio" name="mode" value="text"> Text Only</label>
+                    <label><input type="radio" name="mode" value="both" checked> Both</label>
+                </div>
+            </div>
+
+            <button type="submit" class="btn-rip" id="btn-rip">Rip It</button>
+        </form>
+
+        <div class="progress-area" id="progress-area"></div>
+
+        <div class="downloads" id="downloads">
+            <h3>Downloads</h3>
+            <div id="download-links"></div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('rip-form');
+        const btn = document.getElementById('btn-rip');
+        const progressArea = document.getElementById('progress-area');
+        const downloads = document.getElementById('downloads');
+        const downloadLinks = document.getElementById('download-links');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const url = document.getElementById('url').value.trim();
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+
+            if (!url) return;
+
+            // Reset UI
+            btn.disabled = true;
+            btn.textContent = 'Working...';
+            progressArea.innerHTML = '';
+            progressArea.classList.add('active');
+            downloads.classList.remove('active');
+            downloadLinks.innerHTML = '';
+
+            let lastStatus = null;
+
+            try {
+                const response = await fetch('/rip', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, mode })
+                });
+
+                if (!response.ok) {
+                    const text = await response.text();
+                    addStatus(text || 'Request failed', true);
+                    resetButton();
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const json = line.slice(6);
+                        try {
+                            const msg = JSON.parse(json);
+                            if (msg.type === 'status') {
+                                // Dim the previous status line
+                                if (lastStatus) lastStatus.classList.remove('current');
+                                lastStatus = addStatus(msg.data);
+                            } else if (msg.type === 'error') {
+                                addStatus(msg.data, true);
+                            } else if (msg.type === 'result') {
+                                showDownloads(msg.data);
+                            }
+                        } catch (_) {
+                            // skip malformed lines
+                        }
+                    }
+                }
+            } catch (err) {
+                addStatus('Connection error: ' + err.message, true);
+            }
+
+            resetButton();
+        });
+
+        function addStatus(text, isError = false) {
+            const div = document.createElement('div');
+            div.className = 'status-line' + (isError ? ' error' : ' current');
+            div.textContent = text;
+            progressArea.appendChild(div);
+            return div;
+        }
+
+        function showDownloads(result) {
+            if (result.audio) {
+                const a = document.createElement('a');
+                a.href = '/download/' + encodeURIComponent(result.audio);
+                a.className = 'dl-link';
+                a.textContent = 'Download Audio (M4A)';
+                downloadLinks.appendChild(a);
+            }
+            if (result.pdf) {
+                const a = document.createElement('a');
+                a.href = '/download/' + encodeURIComponent(result.pdf);
+                a.className = 'dl-link';
+                a.textContent = 'Download Transcript (PDF)';
+                downloadLinks.appendChild(a);
+            }
+            downloads.classList.add('active');
+        }
+
+        function resetButton() {
+            btn.disabled = false;
+            btn.textContent = 'Rip It';
+        }
+    </script>
+</body>
+</html>
