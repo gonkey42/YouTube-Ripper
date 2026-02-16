@@ -3,7 +3,7 @@
 import json
 import re
 
-from flask import Flask, Response, render_template, request, send_from_directory
+from flask import Flask, Response, render_template, request
 
 import ripper
 
@@ -48,11 +48,6 @@ def rip():
             yield f"data: {payload}\n\n"
 
     return Response(generate(), mimetype="text/event-stream")
-
-
-@app.route("/download/<path:filename>")
-def download(filename):
-    return send_from_directory("output", filename, as_attachment=True)
 
 
 if __name__ == "__main__":

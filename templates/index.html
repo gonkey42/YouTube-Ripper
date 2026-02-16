@@ -42,7 +42,7 @@
         <div class="progress-area" id="progress-area"></div>
 
         <div class="downloads" id="downloads">
-            <h3>Downloads</h3>
+            <h3>Saved Files</h3>
             <div id="download-links"></div>
         </div>
     </div>
@@ -149,26 +149,16 @@
         }
 
         function showDownloads(result) {
-            if (result.video) {
-                const a = document.createElement('a');
-                a.href = '/download/' + encodeURIComponent(result.video);
-                a.className = 'dl-link';
-                a.textContent = 'Download Video (MP4)';
-                downloadLinks.appendChild(a);
-            }
-            if (result.audio) {
-                const a = document.createElement('a');
-                a.href = '/download/' + encodeURIComponent(result.audio);
-                a.className = 'dl-link';
-                a.textContent = 'Download Audio (M4A)';
-                downloadLinks.appendChild(a);
-            }
-            if (result.pdf) {
-                const a = document.createElement('a');
-                a.href = '/download/' + encodeURIComponent(result.pdf);
-                a.className = 'dl-link';
-                a.textContent = 'Download Transcript (PDF)';
-                downloadLinks.appendChild(a);
+            const files = [];
+            if (result.video) files.push(result.video);
+            if (result.audio) files.push(result.audio);
+            if (result.pdf) files.push(result.pdf);
+
+            for (const filename of files) {
+                const div = document.createElement('div');
+                div.className = 'file-entry';
+                div.textContent = filename;
+                downloadLinks.appendChild(div);
             }
             downloads.classList.add('active');
         }

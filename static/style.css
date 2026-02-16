@@ -185,20 +185,11 @@ select option {
     margin-bottom: 0.75rem;
 }
 
-.dl-link {
-    display: inline-block;
-    padding: 0.5rem 1rem;
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    border-radius: 0.4rem;
-    color: #34d399;
-    text-decoration: none;
+.file-entry {
     font-size: 0.85rem;
-    margin-right: 0.5rem;
-    margin-bottom: 0.5rem;
-    transition: background 0.2s;
-}
-
-.dl-link:hover {
-    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+    padding: 0.4rem 0.75rem;
+    border-left: 2px solid rgba(52, 211, 153, 0.4);
+    margin-bottom: 0.3rem;
+    word-break: break-all;
 }
