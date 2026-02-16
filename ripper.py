@@ -1,6 +1,9 @@
-"""Core logic for YouTube audio extraction, transcription, and PDF generation."""
+"""Core logic for YouTube audio/video extraction, transcription, and PDF generation."""
 
+import queue
 import re
+import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +31,96 @@ def _sanitize_filename(title: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', "", title)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:200] if name else "untitled"
+
+
+def _format_bytes(num_bytes) -> str:
+    """Format bytes into human-readable string."""
+    if not num_bytes:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(num_bytes) < 1024:
+            return f"{num_bytes:.1f}{unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.1f}TB"
+
+
+def _format_speed(bps) -> str:
+    """Format bytes/sec into human-readable speed."""
+    if not bps:
+        return "?"
+    return f"{_format_bytes(bps)}/s"
+
+
+def _format_eta(seconds) -> str:
+    """Format seconds into M:SS or H:MM:SS."""
+    if seconds is None:
+        return "?"
+    seconds = int(seconds)
+    if seconds < 3600:
+        return f"{seconds // 60}:{seconds % 60:02d}"
+    return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+
+
+QUALITY_FORMATS = {
+    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
+    "best": "bestvideo+bestaudio/best",
+}
+
+
+def download_video(
+    url: str,
+    quality: str = "1080p",
+    progress_queue: queue.Queue | None = None,
+) -> tuple[Path, str]:
+    """Download video from a YouTube URL as MP4. Returns (filepath, title)."""
+    info_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(info_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        title = info.get("title", "Untitled")
+        video_id = info.get("id", "unknown")
+
+    safe_name = _sanitize_filename(title)
+    output_path = OUTPUT_DIR / f"{safe_name} [{video_id}].mp4"
+
+    def progress_hook(d):
+        if progress_queue is None:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            downloaded = d.get("downloaded_bytes", 0)
+            percent = (downloaded / total * 100) if total > 0 else 0
+            progress_queue.put({
+                "status": "downloading",
+                "percent": round(percent, 1),
+                "speed": _format_speed(d.get("speed")),
+                "eta": _format_eta(d.get("eta")),
+            })
+        elif status == "finished":
+            progress_queue.put({"status": "finished"})
+
+    def postprocessor_hook(d):
+        if progress_queue is None:
+            return
+        if d.get("status") == "started" and "Merger" in d.get("postprocessor", ""):
+            progress_queue.put({"status": "merging"})
+
+    fmt = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])
+    dl_opts = {
+        "format": fmt,
+        "merge_output_format": "mp4",
+        "outtmpl": str(OUTPUT_DIR / f"{safe_name} [{video_id}].%(ext)s"),
+        "progress_hooks": [progress_hook],
+        "postprocessor_hooks": [postprocessor_hook],
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(dl_opts) as ydl:
+        ydl.download([url])
+
+    return output_path, title
 
 
 def download_audio(url: str) -> tuple[Path, str]:
@@ -144,11 +237,138 @@ def generate_pdf(html: str, title: str) -> Path:
     return pdf_path
 
 
-def process(url: str, mode: str):
+def _run_video_download_with_progress(url: str, quality: str):
+    """Run download_video in a thread, yielding SSE status messages for progress."""
+    prog_queue = queue.Queue()
+    result_holder = {"path": None, "title": None, "error": None}
+
+    def _download():
+        try:
+            path, title = download_video(url, quality, progress_queue=prog_queue)
+            result_holder["path"] = path
+            result_holder["title"] = title
+        except Exception as e:
+            result_holder["error"] = str(e)
+        finally:
+            prog_queue.put(None)  # sentinel
+
+    thread = threading.Thread(target=_download, daemon=True)
+    thread.start()
+
+    last_percent = -1
+    while True:
+        try:
+            update = prog_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if update is None:
+            break
+
+        status = update.get("status")
+        if status == "downloading":
+            percent = update["percent"]
+            if percent - last_percent >= 2 or percent >= 99:
+                last_percent = percent
+                msg = f"Downloading video... {percent}%"
+                if update["speed"] != "?":
+                    msg += f" ({update['speed']}"
+                    if update["eta"] != "?":
+                        msg += f", ETA {update['eta']}"
+                    msg += ")"
+                yield ("status", msg)
+        elif status == "merging":
+            yield ("status", "Merging video and audio streams...")
+        elif status == "finished":
+            yield ("status", "Download complete, finalizing...")
+
+    thread.join(timeout=10)
+
+    if result_holder["error"]:
+        yield ("error", f"Video download failed: {result_holder['error']}")
+        return
+
+    video_path = result_holder["path"]
+    title = result_holder["title"]
+
+    if video_path and video_path.exists():
+        size = _format_bytes(video_path.stat().st_size)
+        yield ("status", f"Video saved: {title} ({size})")
+
+    yield ("_done", {"path": video_path, "title": title})
+
+
+def _extract_audio_from_video(video_path: Path) -> Path:
+    """Extract audio track from MP4 to M4A using ffmpeg."""
+    audio_path = video_path.with_suffix(".temp.m4a")
+    subprocess.run(
+        ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "copy",
+         str(audio_path), "-y"],
+        capture_output=True,
+        check=True,
+    )
+    return audio_path
+
+
+def process(url: str, mode: str, quality: str = "1080p"):
     """Main orchestrator. Yields (type, data) tuples for SSE streaming.
 
-    mode: 'audio', 'text', or 'both'
+    mode: 'audio', 'text', 'both', 'video', or 'video_text'
     """
+    # --- Video modes ---
+    if mode in ("video", "video_text"):
+        yield ("status", "Fetching video info...")
+
+        video_path = None
+        title = None
+        for msg_type, msg_data in _run_video_download_with_progress(url, quality):
+            if msg_type == "_done":
+                video_path = msg_data["path"]
+                title = msg_data["title"]
+            else:
+                yield (msg_type, msg_data)
+                if msg_type == "error":
+                    return
+
+        if video_path is None:
+            yield ("error", "Video download produced no output.")
+            return
+
+        result = {"video": video_path.name}
+
+        if mode == "video_text":
+            yield ("status", "Extracting audio for transcription...")
+            try:
+                audio_path = _extract_audio_from_video(video_path)
+            except Exception as e:
+                yield ("error", f"Audio extraction failed: {e}")
+                return
+
+            yield ("status", "Transcribing with Whisper... (this may take a minute)")
+            try:
+                segments = transcribe_audio(audio_path)
+            except Exception as e:
+                yield ("error", f"Transcription failed: {e}")
+                return
+
+            yield ("status", "Generating PDF...")
+            try:
+                html = format_transcript(segments, title, url)
+                pdf_path = generate_pdf(html, title)
+                result["pdf"] = pdf_path.name
+            except Exception as e:
+                yield ("error", f"PDF generation failed: {e}")
+                return
+
+            # Clean up temp audio
+            if audio_path.exists():
+                audio_path.unlink()
+
+        yield ("status", "Done! Your files are ready.")
+        yield ("result", result)
+        return
+
+    # --- Audio / Text / Both modes (unchanged) ---
     yield ("status", "Fetching video info and downloading audio...")
 
     try:

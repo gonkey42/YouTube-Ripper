@@ -9,7 +9,7 @@
 <body>
     <div class="card">
         <h1>YouTube Ripper</h1>
-        <p class="subtitle">Extract audio &amp; transcripts from YouTube videos</p>
+        <p class="subtitle">Extract audio, video &amp; transcripts from YouTube</p>
 
         <form id="rip-form">
             <label class="field-label" for="url">YouTube URL</label>
@@ -20,8 +20,20 @@
                 <div class="mode-options">
                     <label><input type="radio" name="mode" value="audio"> Audio Only</label>
                     <label><input type="radio" name="mode" value="text"> Text Only</label>
-                    <label><input type="radio" name="mode" value="both" checked> Both</label>
+                    <label><input type="radio" name="mode" value="both" checked> Audio + Text</label>
+                    <label><input type="radio" name="mode" value="video"> Video</label>
+                    <label><input type="radio" name="mode" value="video_text"> Video + Text</label>
                 </div>
+            </div>
+
+            <div class="quality-group" id="quality-group" style="display:none">
+                <label class="field-label">Video Quality</label>
+                <select id="quality" name="quality">
+                    <option value="1080p" selected>1080p (Full HD)</option>
+                    <option value="720p">720p (HD)</option>
+                    <option value="480p">480p (SD)</option>
+                    <option value="best">Best Available</option>
+                </select>
             </div>
 
             <button type="submit" class="btn-rip" id="btn-rip">Rip It</button>
@@ -30,7 +42,7 @@
         <div class="progress-area" id="progress-area"></div>
 
         <div class="downloads" id="downloads">
-            <h3>Downloads</h3>
+            <h3>Saved Files</h3>
             <div id="download-links"></div>
         </div>
     </div>
@@ -41,22 +53,32 @@
         const progressArea = document.getElementById('progress-area');
         const downloads = document.getElementById('downloads');
         const downloadLinks = document.getElementById('download-links');
+        const qualityGroup = document.getElementById('quality-group');
+
+        // Show/hide quality dropdown for video modes
+        document.querySelectorAll('input[name="mode"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                const isVideo = e.target.value === 'video' || e.target.value === 'video_text';
+                qualityGroup.style.display = isVideo ? '' : 'none';
+            });
+        });
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const url = document.getElementById('url').value.trim();
             const mode = document.querySelector('input[name="mode"]:checked').value;
+            const quality = document.getElementById('quality').value;
 
             if (!url) return;
 
             // Reset UI
             btn.disabled = true;
             btn.textContent = 'Working...';
-            progressArea.innerHTML = '';
+            while (progressArea.firstChild) progressArea.removeChild(progressArea.firstChild);
             progressArea.classList.add('active');
             downloads.classList.remove('active');
-            downloadLinks.innerHTML = '';
+            while (downloadLinks.firstChild) downloadLinks.removeChild(downloadLinks.firstChild);
 
             let lastStatus = null;
 
@@ -64,7 +86,7 @@
                 const response = await fetch('/rip', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, mode })
+                    body: JSON.stringify({ url, mode, quality })
                 });
 
                 if (!response.ok) {
@@ -92,9 +114,15 @@
                         try {
                             const msg = JSON.parse(json);
                             if (msg.type === 'status') {
-                                // Dim the previous status line
-                                if (lastStatus) lastStatus.classList.remove('current');
-                                lastStatus = addStatus(msg.data);
+                                // In-place update for video download progress
+                                if (lastStatus
+                                    && msg.data.startsWith('Downloading video...')
+                                    && lastStatus.textContent.startsWith('Downloading video...')) {
+                                    lastStatus.textContent = msg.data;
+                                } else {
+                                    if (lastStatus) lastStatus.classList.remove('current');
+                                    lastStatus = addStatus(msg.data);
+                                }
                             } else if (msg.type === 'error') {
                                 addStatus(msg.data, true);
                             } else if (msg.type === 'result') {
@@ -121,19 +149,16 @@
         }
 
         function showDownloads(result) {
-            if (result.audio) {
-                const a = document.createElement('a');
-                a.href = '/download/' + encodeURIComponent(result.audio);
-                a.className = 'dl-link';
-                a.textContent = 'Download Audio (M4A)';
-                downloadLinks.appendChild(a);
-            }
-            if (result.pdf) {
-                const a = document.createElement('a');
-                a.href = '/download/' + encodeURIComponent(result.pdf);
-                a.className = 'dl-link';
-                a.textContent = 'Download Transcript (PDF)';
-                downloadLinks.appendChild(a);
+            const files = [];
+            if (result.video) files.push(result.video);
+            if (result.audio) files.push(result.audio);
+            if (result.pdf) files.push(result.pdf);
+
+            for (const filename of files) {
+                const div = document.createElement('div');
+                div.className = 'file-entry';
+                div.textContent = filename;
+                downloadLinks.appendChild(div);
             }
             downloads.classList.add('active');
         }

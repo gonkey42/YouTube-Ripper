@@ -72,6 +72,7 @@ input[type="text"]::placeholder {
 
 .mode-options {
     display: flex;
+    flex-wrap: wrap;
     gap: 1rem;
     margin-top: 0.5rem;
 }
@@ -87,6 +88,33 @@ input[type="text"]::placeholder {
 
 input[type="radio"] {
     accent-color: #34d399;
+}
+
+.quality-group {
+    margin-bottom: 1.5rem;
+}
+
+select {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    color: #e8e8ed;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+    cursor: pointer;
+    margin-top: 0.5rem;
+}
+
+select:focus {
+    border-color: #34d399;
+}
+
+select option {
+    background: #1a1a2e;
+    color: #e8e8ed;
 }
 
 .btn-rip {
@@ -157,20 +185,11 @@ input[type="radio"] {
     margin-bottom: 0.75rem;
 }
 
-.dl-link {
-    display: inline-block;
-    padding: 0.5rem 1rem;
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    border-radius: 0.4rem;
-    color: #34d399;
-    text-decoration: none;
+.file-entry {
     font-size: 0.85rem;
-    margin-right: 0.5rem;
-    margin-bottom: 0.5rem;
-    transition: background 0.2s;
-}
-
-.dl-link:hover {
-    background: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+    padding: 0.4rem 0.75rem;
+    border-left: 2px solid rgba(52, 211, 153, 0.4);
+    margin-bottom: 0.3rem;
+    word-break: break-all;
 }
