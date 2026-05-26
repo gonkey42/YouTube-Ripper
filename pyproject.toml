@@ -7,5 +7,5 @@ requires-python = ">=3.12"
 dependencies = [
     "faster-whisper>=1.2.1",
     "flask>=3.1.2",
-    "yt-dlp>=2026.2.4",
+    "yt-dlp>=2026.3.17",
 ]

@@ -193,3 +193,12 @@ select option {
     margin-bottom: 0.3rem;
     word-break: break-all;
 }
+
+.file-entry a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.file-entry a:hover {
+    text-decoration: underline;
+}

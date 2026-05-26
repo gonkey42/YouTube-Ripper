@@ -57,7 +57,15 @@ FLASK_DEBUG=1 uv run python app.py
 
 ## Output
 
-Files are saved to `output/` (gitignored). The UI shows filenames of saved files — grab them from the output folder. In "Text Only" mode, the audio file is automatically deleted after transcription. In "Video + Text" mode, the temporary audio extraction is cleaned up after transcription.
+Files are saved to `output/` by default (gitignored). The UI shows clickable saved-file links after each run, so you can download the generated files directly from the browser.
+
+Generated filenames include the YouTube id to avoid collisions between same-title videos:
+
+- `Title [video_id].m4a`
+- `Title [video_id].mp4`
+- `Title [video_id].txt`
+
+In "Text Only" mode, the downloaded audio file is automatically deleted after transcription. In "Video + Text" mode, the app downloads the video once, extracts temporary transcription audio locally with `ffmpeg`, and removes that temporary audio after transcription.
 
 ## Notes
 
@@ -66,3 +74,18 @@ Files are saved to `output/` (gitignored). The UI shows filenames of saved files
 - Port: 4039
 - YouTube downloads use your local Chrome `Profile 1` cookies by default to avoid bot/sign-in checkpoints.
 - To override auth, set `YOUTUBE_RIPPER_COOKIES_FROM_BROWSER`, for example `firefox:default`, or set `YOUTUBE_RIPPER_COOKIES` to a Netscape-format cookies file.
+
+## Configuration
+
+Optional environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `YOUTUBE_RIPPER_OUTPUT_DIR` | `output/` | Directory for generated files |
+| `YOUTUBE_RIPPER_HOST` | `0.0.0.0` | Flask bind host |
+| `YOUTUBE_RIPPER_PORT` | `4039` | Flask port |
+| `YOUTUBE_RIPPER_WHISPER_MODEL` | `base` | faster-whisper model name |
+| `YOUTUBE_RIPPER_WHISPER_DEVICE` | `cpu` | faster-whisper device |
+| `YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE` | `int8` | faster-whisper compute type |
+| `YOUTUBE_RIPPER_COOKIES_FROM_BROWSER` | `chrome:Profile 1` | Browser cookies source for yt-dlp |
+| `YOUTUBE_RIPPER_COOKIES` | unset | Netscape-format cookies file path |
