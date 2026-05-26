@@ -1,6 +1,6 @@
 # YouTube Ripper
 
-Local web utility that extracts audio and video from YouTube, transcribes with Whisper, and generates clean formatted PDFs.
+Local web utility that extracts audio and video from YouTube, transcribes with Whisper, and generates clean text transcripts.
 
 ## Features
 
@@ -9,7 +9,7 @@ Local web utility that extracts audio and video from YouTube, transcribes with W
 - **Audio format:** M4A (AAC) — plays on Mac, Android, iOS
 - **Video format:** MP4 with merged audio
 - **Transcription:** Local Whisper (faster-whisper) — no cloud APIs, no data leaves your machine
-- **PDF output:** Clean document with title, source URL, paragraph breaks
+- **Text output:** Clean `.txt` transcript with title, source URL, and paragraph breaks
 - **Real-time progress** via Server-Sent Events (download %, speed, ETA for video)
 - **Supported URLs:** `youtube.com/watch`, `youtu.be`, `youtube.com/shorts`, `youtube.com/live`
 
@@ -18,32 +18,31 @@ Local web utility that extracts audio and video from YouTube, transcribes with W
 | Mode | What you get | Quality picker? |
 |------|-------------|-----------------|
 | Audio Only | M4A | No |
-| Text Only | PDF transcript | No |
-| Audio + Text | M4A + PDF | No |
+| Text Only | TXT transcript | No |
+| Audio + Text | M4A + TXT | No |
 | Video | MP4 | Yes |
-| Video + Text | MP4 + PDF | Yes |
+| Video + Text | MP4 + TXT | Yes |
 
-**Video + Text** downloads the video, extracts the audio track, runs Whisper on it, generates the PDF, and cleans up the intermediate audio file.
+**Video + Text** downloads the video, extracts the audio track, runs Whisper on it, generates the text transcript, and cleans up the intermediate audio file.
 
 ## Requirements
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 - ffmpeg (`brew install ffmpeg`)
-- pango + glib (`brew install pango glib`) — for WeasyPrint PDF rendering
 
 ## Quick Start
 
 ```bash
 cd tools/youtube-ripper
-DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python app.py
+uv run python app.py
 ```
 
 Open http://localhost:4039, paste a YouTube URL, pick your mode, and hit **Rip It**.
 
 For development with auto-reload:
 ```bash
-FLASK_DEBUG=1 DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python app.py
+FLASK_DEBUG=1 uv run python app.py
 ```
 
 ## Stack
@@ -52,7 +51,7 @@ FLASK_DEBUG=1 DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python app.py
 |-----------|------|
 | YouTube download | yt-dlp |
 | Transcription | faster-whisper (base model, int8) |
-| PDF generation | WeasyPrint |
+| Text generation | Python pathlib |
 | Web server | Flask |
 | Frontend | Vanilla HTML/CSS/JS |
 
@@ -65,3 +64,5 @@ Files are saved to `output/` (gitignored). The UI shows filenames of saved files
 - First run downloads the Whisper `base` model (~150MB)
 - No database, no accounts, no cloud services
 - Port: 4039
+- YouTube downloads use your local Chrome `Profile 1` cookies by default to avoid bot/sign-in checkpoints.
+- To override auth, set `YOUTUBE_RIPPER_COOKIES_FROM_BROWSER`, for example `firefox:default`, or set `YOUTUBE_RIPPER_COOKIES` to a Netscape-format cookies file.

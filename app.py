@@ -44,10 +44,15 @@ def rip():
 
     def generate():
         for msg_type, msg_data in ripper.process(url, mode, quality):
+            if msg_type.startswith("_"):
+                continue
             payload = json.dumps({"type": msg_type, "data": msg_data})
             yield f"data: {payload}\n\n"
 
-    return Response(generate(), mimetype="text/event-stream")
+    resp = Response(generate(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
 
 if __name__ == "__main__":

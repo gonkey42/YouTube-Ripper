@@ -116,8 +116,8 @@
                             if (msg.type === 'status') {
                                 // In-place update for video download progress
                                 if (lastStatus
-                                    && msg.data.startsWith('Downloading video...')
-                                    && lastStatus.textContent.startsWith('Downloading video...')) {
+                                    && (msg.data.startsWith('Downloading video...') || msg.data.startsWith('Still transcribing...'))
+                                    && (lastStatus.textContent.startsWith('Downloading video...') || lastStatus.textContent.startsWith('Still transcribing...'))) {
                                     lastStatus.textContent = msg.data;
                                 } else {
                                     if (lastStatus) lastStatus.classList.remove('current');
@@ -152,7 +152,7 @@
             const files = [];
             if (result.video) files.push(result.video);
             if (result.audio) files.push(result.audio);
-            if (result.pdf) files.push(result.pdf);
+            if (result.text) files.push(result.text);
 
             for (const filename of files) {
                 const div = document.createElement('div');

@@ -1,17 +1,18 @@
-"""Core logic for YouTube audio/video extraction, transcription, and PDF generation."""
+"""Core logic for YouTube audio/video extraction, transcription, and text generation."""
 
+import os
 import queue
 import re
-import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
 
 import yt_dlp
-from weasyprint import HTML
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+DEFAULT_COOKIES_FROM_BROWSER = "chrome:Profile 1"
 
 _whisper_model = None
 
@@ -69,13 +70,48 @@ QUALITY_FORMATS = {
 }
 
 
+def _parse_cookies_from_browser(value: str) -> tuple[str, str | None, str | None, str | None] | None:
+    value = value.strip()
+    if not value or value.lower() in {"0", "false", "none", "off"}:
+        return None
+
+    browser, _, profile = value.partition(":")
+    browser = browser.strip()
+    profile = profile.strip() or None
+    return (browser, profile, None, None)
+
+
+def _yt_dlp_opts(extra_opts: dict | None = None) -> dict:
+    """Build common yt-dlp options, including YouTube auth cookies."""
+    opts = dict(extra_opts or {})
+
+    cookie_file = (
+        os.environ.get("YOUTUBE_RIPPER_COOKIES")
+        or os.environ.get("YT_DLP_COOKIES")
+    )
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+        return opts
+
+    cookies_from_browser = (
+        os.environ.get("YOUTUBE_RIPPER_COOKIES_FROM_BROWSER")
+        or os.environ.get("YT_DLP_COOKIES_FROM_BROWSER")
+        or DEFAULT_COOKIES_FROM_BROWSER
+    )
+    parsed = _parse_cookies_from_browser(cookies_from_browser)
+    if parsed:
+        opts["cookiesfrombrowser"] = parsed
+
+    return opts
+
+
 def download_video(
     url: str,
     quality: str = "1080p",
     progress_queue: queue.Queue | None = None,
 ) -> tuple[Path, str]:
     """Download video from a YouTube URL as MP4. Returns (filepath, title)."""
-    info_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
     with yt_dlp.YoutubeDL(info_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         title = info.get("title", "Untitled")
@@ -108,7 +144,7 @@ def download_video(
             progress_queue.put({"status": "merging"})
 
     fmt = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])
-    dl_opts = {
+    dl_opts = _yt_dlp_opts({
         "format": fmt,
         "merge_output_format": "mp4",
         "outtmpl": str(OUTPUT_DIR / f"{safe_name} [{video_id}].%(ext)s"),
@@ -116,7 +152,7 @@ def download_video(
         "postprocessor_hooks": [postprocessor_hook],
         "quiet": True,
         "no_warnings": True,
-    }
+    })
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([url])
 
@@ -125,7 +161,7 @@ def download_video(
 
 def download_audio(url: str) -> tuple[Path, str]:
     """Download audio from a YouTube URL as M4A. Returns (filepath, title)."""
-    info_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
     with yt_dlp.YoutubeDL(info_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         title = info.get("title", "Untitled")
@@ -133,7 +169,7 @@ def download_audio(url: str) -> tuple[Path, str]:
     safe_name = _sanitize_filename(title)
     output_path = OUTPUT_DIR / f"{safe_name}.m4a"
 
-    dl_opts = {
+    dl_opts = _yt_dlp_opts({
         "format": "bestaudio[ext=m4a]/bestaudio",
         "outtmpl": str(OUTPUT_DIR / f"{safe_name}.%(ext)s"),
         "postprocessors": [
@@ -144,7 +180,7 @@ def download_audio(url: str) -> tuple[Path, str]:
         ],
         "quiet": True,
         "no_warnings": True,
-    }
+    })
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([url])
 
@@ -168,8 +204,36 @@ def transcribe_audio(filepath: Path):
     return list(segments)
 
 
+def _run_transcription_with_keepalive(filepath: Path):
+    """Run transcription in a thread, yielding keepalive SSE messages."""
+    result_holder = {"segments": None, "error": None}
+    done_event = threading.Event()
+
+    def _transcribe():
+        try:
+            result_holder["segments"] = transcribe_audio(filepath)
+        except Exception as e:
+            result_holder["error"] = str(e)
+        finally:
+            done_event.set()
+
+    thread = threading.Thread(target=_transcribe, daemon=True)
+    thread.start()
+
+    while not done_event.wait(timeout=3):
+        yield ("status", "Still transcribing...")
+
+    thread.join(timeout=5)
+
+    if result_holder["error"]:
+        yield ("error", f"Transcription failed: {result_holder['error']}")
+        return
+
+    yield ("_done", result_holder["segments"])
+
+
 def format_transcript(segments, title: str, url: str) -> str:
-    """Format transcript segments into clean HTML for PDF rendering."""
+    """Format transcript segments into a readable plain-text transcript."""
     full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
 
     if not full_text:
@@ -187,54 +251,16 @@ def format_transcript(segments, title: str, url: str) -> str:
 
     date_str = datetime.now().strftime("%B %d, %Y")
 
-    para_html = "\n".join(f"    <p>{p}</p>" for p in paragraphs)
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-    body {{
-        font-family: Georgia, 'Times New Roman', serif;
-        line-height: 1.6;
-        max-width: 700px;
-        margin: 40px auto;
-        padding: 0 20px;
-        color: #1a1a1a;
-    }}
-    h1 {{
-        font-size: 1.6em;
-        margin-bottom: 0.3em;
-        line-height: 1.3;
-    }}
-    .meta {{
-        color: #666;
-        font-size: 0.85em;
-        margin-bottom: 2em;
-        border-bottom: 1px solid #ddd;
-        padding-bottom: 1em;
-    }}
-    p {{
-        margin-bottom: 1em;
-        text-align: justify;
-    }}
-</style>
-</head>
-<body>
-    <h1>{title}</h1>
-    <p class="meta">Source: {url}<br>Transcribed: {date_str}</p>
-{para_html}
-</body>
-</html>"""
-    return html
+    body = "\n\n".join(paragraphs)
+    return f"{title}\n\nSource: {url}\nTranscribed: {date_str}\n\n{body}\n"
 
 
-def generate_pdf(html: str, title: str) -> Path:
-    """Render HTML transcript to PDF. Returns filepath."""
+def generate_text(transcript: str, title: str) -> Path:
+    """Write a plain-text transcript. Returns filepath."""
     safe_name = _sanitize_filename(title)
-    pdf_path = OUTPUT_DIR / f"{safe_name}.pdf"
-    HTML(string=html).write_pdf(str(pdf_path))
-    return pdf_path
+    text_path = OUTPUT_DIR / f"{safe_name}.txt"
+    text_path.write_text(transcript, encoding="utf-8")
+    return text_path
 
 
 def _run_video_download_with_progress(url: str, quality: str):
@@ -298,25 +324,14 @@ def _run_video_download_with_progress(url: str, quality: str):
     yield ("_done", {"path": video_path, "title": title})
 
 
-def _extract_audio_from_video(video_path: Path) -> Path:
-    """Extract audio track from MP4 to M4A using ffmpeg."""
-    audio_path = video_path.with_suffix(".temp.m4a")
-    subprocess.run(
-        ["ffmpeg", "-i", str(video_path), "-vn", "-acodec", "copy",
-         str(audio_path), "-y"],
-        capture_output=True,
-        check=True,
-    )
-    return audio_path
-
 
 def process(url: str, mode: str, quality: str = "1080p"):
     """Main orchestrator. Yields (type, data) tuples for SSE streaming.
 
     mode: 'audio', 'text', 'both', 'video', or 'video_text'
     """
-    # --- Video modes ---
-    if mode in ("video", "video_text"):
+    # --- Video only mode ---
+    if mode == "video":
         yield ("status", "Fetching video info...")
 
         video_path = None
@@ -334,38 +349,69 @@ def process(url: str, mode: str, quality: str = "1080p"):
             yield ("error", "Video download produced no output.")
             return
 
-        result = {"video": video_path.name}
+        yield ("status", "Done! Your files are ready.")
+        yield ("result", {"video": video_path.name})
+        return
 
-        if mode == "video_text":
-            yield ("status", "Extracting audio for transcription...")
-            try:
-                audio_path = _extract_audio_from_video(video_path)
-            except Exception as e:
-                yield ("error", f"Audio extraction failed: {e}")
-                return
+    # --- Video + Text mode ---
+    if mode == "video_text":
+        # Step 1: Download audio separately (fast, reuses existing download_audio)
+        yield ("status", "Downloading audio for transcription...")
+        try:
+            audio_path, title = download_audio(url)
+        except Exception as e:
+            yield ("error", f"Audio download failed: {e}")
+            return
 
-            yield ("status", "Transcribing with Whisper... (this may take a minute)")
-            try:
-                segments = transcribe_audio(audio_path)
-            except Exception as e:
-                yield ("error", f"Transcription failed: {e}")
-                return
+        # Step 2: Transcribe (threaded with keepalive to prevent SSE timeout)
+        yield ("status", "Transcribing with Whisper... (this may take a minute)")
+        segments = None
+        for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+            if msg_type == "_done":
+                segments = msg_data
+            else:
+                yield (msg_type, msg_data)
+                if msg_type == "error":
+                    if audio_path.exists():
+                        audio_path.unlink()
+                    return
 
-            yield ("status", "Generating PDF...")
-            try:
-                html = format_transcript(segments, title, url)
-                pdf_path = generate_pdf(html, title)
-                result["pdf"] = pdf_path.name
-            except Exception as e:
-                yield ("error", f"PDF generation failed: {e}")
-                return
-
-            # Clean up temp audio
+        # Step 3: Generate text transcript
+        yield ("status", "Generating text file...")
+        try:
+            transcript = format_transcript(segments, title, url)
+            text_path = generate_text(transcript, title)
+        except Exception as e:
+            yield ("error", f"Text generation failed: {e}")
             if audio_path.exists():
                 audio_path.unlink()
+            return
+
+        # Step 4: Download video (slow, with progress bar)
+        yield ("status", "Fetching video info...")
+        video_path = None
+        for msg_type, msg_data in _run_video_download_with_progress(url, quality):
+            if msg_type == "_done":
+                video_path = msg_data["path"]
+            else:
+                yield (msg_type, msg_data)
+                if msg_type == "error":
+                    if audio_path.exists():
+                        audio_path.unlink()
+                    return
+
+        if video_path is None:
+            yield ("error", "Video download produced no output.")
+            if audio_path.exists():
+                audio_path.unlink()
+            return
+
+        # Step 5: Clean up audio file (user gets video + text)
+        if audio_path.exists():
+            audio_path.unlink()
 
         yield ("status", "Done! Your files are ready.")
-        yield ("result", result)
+        yield ("result", {"video": video_path.name, "text": text_path.name})
         return
 
     # --- Audio / Text / Both modes (unchanged) ---
@@ -387,20 +433,23 @@ def process(url: str, mode: str, quality: str = "1080p"):
     if mode in ("text", "both"):
         yield ("status", "Transcribing with Whisper... (this may take a minute)")
 
-        try:
-            segments = transcribe_audio(audio_path)
-        except Exception as e:
-            yield ("error", f"Transcription failed: {e}")
-            return
+        segments = None
+        for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+            if msg_type == "_done":
+                segments = msg_data
+            else:
+                yield (msg_type, msg_data)
+                if msg_type == "error":
+                    return
 
-        yield ("status", "Generating PDF...")
+        yield ("status", "Generating text file...")
 
         try:
-            html = format_transcript(segments, title, url)
-            pdf_path = generate_pdf(html, title)
-            result["pdf"] = pdf_path.name
+            transcript = format_transcript(segments, title, url)
+            text_path = generate_text(transcript, title)
+            result["text"] = text_path.name
         except Exception as e:
-            yield ("error", f"PDF generation failed: {e}")
+            yield ("error", f"Text generation failed: {e}")
             return
 
     # If text-only, clean up the audio file
