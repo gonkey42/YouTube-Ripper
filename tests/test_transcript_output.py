@@ -67,6 +67,36 @@ class TranscriptOutputTests(unittest.TestCase):
         self.assertIn(("status", "Generating text file..."), events)
         self.assertIn(("result", {"text": "Example Video [abc123].txt"}), events)
 
+    def test_video_text_downloads_video_once_and_extracts_temp_audio(self):
+        segments = [SimpleNamespace(text="Hello from video.")]
+
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            video_path = output_dir / "Example Video [abc123].mp4"
+            video_path.write_bytes(b"video")
+            temp_audio_path = output_dir / "Example Video [abc123].transcription.m4a"
+            temp_audio_path.write_bytes(b"audio")
+            info = ripper.MediaInfo(title="Example Video", video_id="abc123")
+
+            with (
+                patch.object(ripper, "OUTPUT_DIR", output_dir),
+                patch.object(
+                    ripper,
+                    "_run_video_download_with_progress",
+                    return_value=[("_done", ripper.DownloadedMedia(path=video_path, info=info))],
+                ) as video_download,
+                patch.object(ripper, "download_audio") as audio_download,
+                patch.object(ripper, "extract_audio_from_video", return_value=temp_audio_path) as extract_audio,
+                patch.object(ripper, "_run_transcription_with_keepalive", return_value=[("_done", segments)]),
+            ):
+                events = list(ripper.process("https://youtu.be/abc123", "video_text"))
+
+        video_download.assert_called_once_with("https://youtu.be/abc123", "1080p")
+        audio_download.assert_not_called()
+        extract_audio.assert_called_once_with(video_path)
+        self.assertFalse(temp_audio_path.exists())
+        self.assertIn(("result", {"video": "Example Video [abc123].mp4", "text": "Example Video [abc123].txt"}), events)
+
 
 if __name__ == "__main__":
     unittest.main()

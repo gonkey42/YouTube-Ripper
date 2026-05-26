@@ -3,6 +3,7 @@
 import os
 import queue
 import re
+import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -212,6 +213,39 @@ def download_video(
     return DownloadedMedia(path=output_path, info=info)
 
 
+def extract_audio_from_video(video_path: Path) -> Path:
+    """Extract temporary audio from a downloaded video for transcription."""
+    audio_path = video_path.with_name(f"{video_path.stem}.transcription.m4a")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-acodec",
+        "aac",
+        "-b:a",
+        "128k",
+        str(audio_path),
+    ]
+
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is required to extract audio from downloaded video.") from exc
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise RuntimeError(f"ffmpeg audio extraction failed: {message}") from exc
+
+    return audio_path
+
+
 def download_audio(url: str) -> DownloadedMedia:
     """Download audio from a YouTube URL as M4A."""
     info = _fetch_media_info(url)
@@ -398,42 +432,8 @@ def process(url: str, mode: str, quality: str = "1080p"):
 
     # --- Video + Text mode ---
     if mode == "video_text":
-        # Step 1: Download audio separately (fast, reuses existing download_audio)
-        yield ("status", "Downloading audio for transcription...")
-        try:
-            downloaded_audio = download_audio(url)
-            audio_path = downloaded_audio.path
-            info = downloaded_audio.info
-        except Exception as e:
-            yield ("error", f"Audio download failed: {e}")
-            return
-
-        # Step 2: Transcribe (threaded with keepalive to prevent SSE timeout)
-        yield ("status", "Transcribing with Whisper... (this may take a minute)")
-        segments = None
-        for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
-            if msg_type == "_done":
-                segments = msg_data
-            else:
-                yield (msg_type, msg_data)
-                if msg_type == "error":
-                    if audio_path.exists():
-                        audio_path.unlink()
-                    return
-
-        # Step 3: Generate text transcript
-        yield ("status", "Generating text file...")
-        try:
-            transcript = format_transcript(segments, info.title, url)
-            text_path = generate_text(transcript, info)
-        except Exception as e:
-            yield ("error", f"Text generation failed: {e}")
-            if audio_path.exists():
-                audio_path.unlink()
-            return
-
-        # Step 4: Download video (slow, with progress bar)
         yield ("status", "Fetching video info...")
+
         downloaded_video = None
         for msg_type, msg_data in _run_video_download_with_progress(url, quality):
             if msg_type == "_done":
@@ -441,19 +441,39 @@ def process(url: str, mode: str, quality: str = "1080p"):
             else:
                 yield (msg_type, msg_data)
                 if msg_type == "error":
-                    if audio_path.exists():
-                        audio_path.unlink()
                     return
 
         if downloaded_video is None:
             yield ("error", "Video download produced no output.")
-            if audio_path.exists():
-                audio_path.unlink()
             return
 
-        # Step 5: Clean up audio file (user gets video + text)
-        if audio_path.exists():
-            audio_path.unlink()
+        yield ("status", "Extracting audio for transcription...")
+        try:
+            audio_path = extract_audio_from_video(downloaded_video.path)
+        except Exception as e:
+            yield ("error", f"Audio extraction failed: {e}")
+            return
+
+        try:
+            yield ("status", "Transcribing with Whisper... (this may take a minute)")
+            segments = None
+            for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+                if msg_type == "_done":
+                    segments = msg_data
+                else:
+                    yield (msg_type, msg_data)
+                    if msg_type == "error":
+                        return
+
+            yield ("status", "Generating text file...")
+            transcript = format_transcript(segments, downloaded_video.info.title, url)
+            text_path = generate_text(transcript, downloaded_video.info)
+        except Exception as e:
+            yield ("error", f"Text generation failed: {e}")
+            return
+        finally:
+            if audio_path.exists():
+                audio_path.unlink()
 
         yield ("status", "Done! Your files are ready.")
         yield ("result", {"video": downloaded_video.path.name, "text": text_path.name})
