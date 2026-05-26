@@ -1,4 +1,5 @@
 output/
+docs/
 __pycache__/
 *.py[oc]
 build/
