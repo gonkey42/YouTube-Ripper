@@ -4,6 +4,7 @@ import os
 import queue
 import re
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,19 @@ OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 DEFAULT_COOKIES_FROM_BROWSER = "chrome:Profile 1"
+
+
+@dataclass(frozen=True)
+class MediaInfo:
+    title: str
+    video_id: str
+
+
+@dataclass(frozen=True)
+class DownloadedMedia:
+    path: Path
+    info: MediaInfo
+
 
 _whisper_model = None
 
@@ -32,6 +46,11 @@ def _sanitize_filename(title: str) -> str:
     name = re.sub(r'[<>:"/\\|?*]', "", title)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:200] if name else "untitled"
+
+
+def _output_stem(info: MediaInfo) -> str:
+    """Return the shared output filename stem for a YouTube item."""
+    return f"{_sanitize_filename(info.title)} [{info.video_id}]"
 
 
 def _format_bytes(num_bytes) -> str:
@@ -105,20 +124,27 @@ def _yt_dlp_opts(extra_opts: dict | None = None) -> dict:
     return opts
 
 
+def _fetch_media_info(url: str) -> MediaInfo:
+    """Fetch title and id without downloading media."""
+    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
+    with yt_dlp.YoutubeDL(info_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    return MediaInfo(
+        title=info.get("title", "Untitled"),
+        video_id=info.get("id", "unknown"),
+    )
+
+
 def download_video(
     url: str,
     quality: str = "1080p",
     progress_queue: queue.Queue | None = None,
-) -> tuple[Path, str]:
-    """Download video from a YouTube URL as MP4. Returns (filepath, title)."""
-    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
-    with yt_dlp.YoutubeDL(info_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        title = info.get("title", "Untitled")
-        video_id = info.get("id", "unknown")
-
-    safe_name = _sanitize_filename(title)
-    output_path = OUTPUT_DIR / f"{safe_name} [{video_id}].mp4"
+) -> DownloadedMedia:
+    """Download video from a YouTube URL as MP4."""
+    info = _fetch_media_info(url)
+    output_stem = _output_stem(info)
+    output_path = OUTPUT_DIR / f"{output_stem}.mp4"
 
     def progress_hook(d):
         if progress_queue is None:
@@ -147,7 +173,7 @@ def download_video(
     dl_opts = _yt_dlp_opts({
         "format": fmt,
         "merge_output_format": "mp4",
-        "outtmpl": str(OUTPUT_DIR / f"{safe_name} [{video_id}].%(ext)s"),
+        "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
         "quiet": True,
@@ -156,22 +182,18 @@ def download_video(
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([url])
 
-    return output_path, title
+    return DownloadedMedia(path=output_path, info=info)
 
 
-def download_audio(url: str) -> tuple[Path, str]:
-    """Download audio from a YouTube URL as M4A. Returns (filepath, title)."""
-    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
-    with yt_dlp.YoutubeDL(info_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        title = info.get("title", "Untitled")
-
-    safe_name = _sanitize_filename(title)
-    output_path = OUTPUT_DIR / f"{safe_name}.m4a"
+def download_audio(url: str) -> DownloadedMedia:
+    """Download audio from a YouTube URL as M4A."""
+    info = _fetch_media_info(url)
+    output_stem = _output_stem(info)
+    output_path = OUTPUT_DIR / f"{output_stem}.m4a"
 
     dl_opts = _yt_dlp_opts({
         "format": "bestaudio[ext=m4a]/bestaudio",
-        "outtmpl": str(OUTPUT_DIR / f"{safe_name}.%(ext)s"),
+        "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -187,14 +209,14 @@ def download_audio(url: str) -> tuple[Path, str]:
     # Find the actual output file (extension may vary depending on source)
     if not output_path.exists():
         # Look for any audio file with the sanitized name
-        candidates = list(OUTPUT_DIR.glob(f"{safe_name}.*"))
+        candidates = list(OUTPUT_DIR.glob(f"{output_stem}.*"))
         audio_exts = {".m4a", ".webm", ".opus", ".mp3", ".ogg", ".wav"}
-        for c in candidates:
-            if c.suffix.lower() in audio_exts:
-                output_path = c
+        for candidate in candidates:
+            if candidate.suffix.lower() in audio_exts:
+                output_path = candidate
                 break
 
-    return output_path, title
+    return DownloadedMedia(path=output_path, info=info)
 
 
 def transcribe_audio(filepath: Path):
@@ -255,10 +277,9 @@ def format_transcript(segments, title: str, url: str) -> str:
     return f"{title}\n\nSource: {url}\nTranscribed: {date_str}\n\n{body}\n"
 
 
-def generate_text(transcript: str, title: str) -> Path:
-    """Write a plain-text transcript. Returns filepath."""
-    safe_name = _sanitize_filename(title)
-    text_path = OUTPUT_DIR / f"{safe_name}.txt"
+def generate_text(transcript: str, info: MediaInfo) -> Path:
+    """Write a plain-text transcript."""
+    text_path = OUTPUT_DIR / f"{_output_stem(info)}.txt"
     text_path.write_text(transcript, encoding="utf-8")
     return text_path
 
@@ -266,13 +287,11 @@ def generate_text(transcript: str, title: str) -> Path:
 def _run_video_download_with_progress(url: str, quality: str):
     """Run download_video in a thread, yielding SSE status messages for progress."""
     prog_queue = queue.Queue()
-    result_holder = {"path": None, "title": None, "error": None}
+    result_holder = {"media": None, "error": None}
 
     def _download():
         try:
-            path, title = download_video(url, quality, progress_queue=prog_queue)
-            result_holder["path"] = path
-            result_holder["title"] = title
+            result_holder["media"] = download_video(url, quality, progress_queue=prog_queue)
         except Exception as e:
             result_holder["error"] = str(e)
         finally:
@@ -314,14 +333,13 @@ def _run_video_download_with_progress(url: str, quality: str):
         yield ("error", f"Video download failed: {result_holder['error']}")
         return
 
-    video_path = result_holder["path"]
-    title = result_holder["title"]
+    media = result_holder["media"]
 
-    if video_path and video_path.exists():
-        size = _format_bytes(video_path.stat().st_size)
-        yield ("status", f"Video saved: {title} ({size})")
+    if media and media.path.exists():
+        size = _format_bytes(media.path.stat().st_size)
+        yield ("status", f"Video saved: {media.info.title} ({size})")
 
-    yield ("_done", {"path": video_path, "title": title})
+    yield ("_done", media)
 
 
 
@@ -334,23 +352,21 @@ def process(url: str, mode: str, quality: str = "1080p"):
     if mode == "video":
         yield ("status", "Fetching video info...")
 
-        video_path = None
-        title = None
+        downloaded_video = None
         for msg_type, msg_data in _run_video_download_with_progress(url, quality):
             if msg_type == "_done":
-                video_path = msg_data["path"]
-                title = msg_data["title"]
+                downloaded_video = msg_data
             else:
                 yield (msg_type, msg_data)
                 if msg_type == "error":
                     return
 
-        if video_path is None:
+        if downloaded_video is None:
             yield ("error", "Video download produced no output.")
             return
 
         yield ("status", "Done! Your files are ready.")
-        yield ("result", {"video": video_path.name})
+        yield ("result", {"video": downloaded_video.path.name})
         return
 
     # --- Video + Text mode ---
@@ -358,7 +374,9 @@ def process(url: str, mode: str, quality: str = "1080p"):
         # Step 1: Download audio separately (fast, reuses existing download_audio)
         yield ("status", "Downloading audio for transcription...")
         try:
-            audio_path, title = download_audio(url)
+            downloaded_audio = download_audio(url)
+            audio_path = downloaded_audio.path
+            info = downloaded_audio.info
         except Exception as e:
             yield ("error", f"Audio download failed: {e}")
             return
@@ -379,8 +397,8 @@ def process(url: str, mode: str, quality: str = "1080p"):
         # Step 3: Generate text transcript
         yield ("status", "Generating text file...")
         try:
-            transcript = format_transcript(segments, title, url)
-            text_path = generate_text(transcript, title)
+            transcript = format_transcript(segments, info.title, url)
+            text_path = generate_text(transcript, info)
         except Exception as e:
             yield ("error", f"Text generation failed: {e}")
             if audio_path.exists():
@@ -389,10 +407,10 @@ def process(url: str, mode: str, quality: str = "1080p"):
 
         # Step 4: Download video (slow, with progress bar)
         yield ("status", "Fetching video info...")
-        video_path = None
+        downloaded_video = None
         for msg_type, msg_data in _run_video_download_with_progress(url, quality):
             if msg_type == "_done":
-                video_path = msg_data["path"]
+                downloaded_video = msg_data
             else:
                 yield (msg_type, msg_data)
                 if msg_type == "error":
@@ -400,7 +418,7 @@ def process(url: str, mode: str, quality: str = "1080p"):
                         audio_path.unlink()
                     return
 
-        if video_path is None:
+        if downloaded_video is None:
             yield ("error", "Video download produced no output.")
             if audio_path.exists():
                 audio_path.unlink()
@@ -411,19 +429,21 @@ def process(url: str, mode: str, quality: str = "1080p"):
             audio_path.unlink()
 
         yield ("status", "Done! Your files are ready.")
-        yield ("result", {"video": video_path.name, "text": text_path.name})
+        yield ("result", {"video": downloaded_video.path.name, "text": text_path.name})
         return
 
     # --- Audio / Text / Both modes (unchanged) ---
     yield ("status", "Fetching video info and downloading audio...")
 
     try:
-        audio_path, title = download_audio(url)
+        downloaded_audio = download_audio(url)
+        audio_path = downloaded_audio.path
+        info = downloaded_audio.info
     except Exception as e:
         yield ("error", f"Download failed: {e}")
         return
 
-    yield ("status", f"Downloaded: {title}")
+    yield ("status", f"Downloaded: {info.title}")
 
     result = {}
 
@@ -445,8 +465,8 @@ def process(url: str, mode: str, quality: str = "1080p"):
         yield ("status", "Generating text file...")
 
         try:
-            transcript = format_transcript(segments, title, url)
-            text_path = generate_text(transcript, title)
+            transcript = format_transcript(segments, info.title, url)
+            text_path = generate_text(transcript, info)
             result["text"] = text_path.name
         except Exception as e:
             yield ("error", f"Text generation failed: {e}")
