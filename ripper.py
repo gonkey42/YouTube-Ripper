@@ -10,8 +10,30 @@ from pathlib import Path
 
 import yt_dlp
 
-OUTPUT_DIR = Path(__file__).parent / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output"
+
+
+def _configured_output_dir() -> Path:
+    configured = os.environ.get("YOUTUBE_RIPPER_OUTPUT_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_OUTPUT_DIR
+
+
+def _whisper_model_name() -> str:
+    return os.environ.get("YOUTUBE_RIPPER_WHISPER_MODEL", "base")
+
+
+def _whisper_device() -> str:
+    return os.environ.get("YOUTUBE_RIPPER_WHISPER_DEVICE", "cpu")
+
+
+def _whisper_compute_type() -> str:
+    return os.environ.get("YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE", "int8")
+
+
+OUTPUT_DIR = _configured_output_dir()
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_COOKIES_FROM_BROWSER = "chrome:Profile 1"
 
@@ -37,7 +59,11 @@ def _get_whisper_model():
     if _whisper_model is None:
         from faster_whisper import WhisperModel
 
-        _whisper_model = WhisperModel("base", compute_type="int8", device="cpu")
+        _whisper_model = WhisperModel(
+            _whisper_model_name(),
+            compute_type=_whisper_compute_type(),
+            device=_whisper_device(),
+        )
     return _whisper_model
 
 

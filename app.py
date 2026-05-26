@@ -72,4 +72,6 @@ if __name__ == "__main__":
     import os
 
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(host="0.0.0.0", port=4039, debug=debug)
+    host = os.environ.get("YOUTUBE_RIPPER_HOST", "0.0.0.0")
+    port = int(os.environ.get("YOUTUBE_RIPPER_PORT", "4039"))
+    app.run(host=host, port=port, debug=debug)
