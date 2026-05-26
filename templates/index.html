@@ -157,7 +157,13 @@
             for (const filename of files) {
                 const div = document.createElement('div');
                 div.className = 'file-entry';
-                div.textContent = filename;
+
+                const link = document.createElement('a');
+                link.href = '/files/' + encodeURIComponent(filename);
+                link.textContent = filename;
+                link.download = filename;
+
+                div.appendChild(link);
                 downloadLinks.appendChild(div);
             }
             downloads.classList.add('active');

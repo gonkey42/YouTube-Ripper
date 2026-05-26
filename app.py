@@ -2,8 +2,9 @@
 
 import json
 import re
+from pathlib import Path
 
-from flask import Flask, Response, render_template, request
+from flask import Flask, Response, abort, render_template, request, send_from_directory
 
 import ripper
 
@@ -18,6 +19,18 @@ YT_PATTERN = re.compile(
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/files/<path:filename>")
+def files(filename):
+    if Path(filename).name != filename:
+        abort(404)
+
+    file_path = ripper.OUTPUT_DIR / filename
+    if not file_path.is_file():
+        abort(404)
+
+    return send_from_directory(ripper.OUTPUT_DIR, filename, as_attachment=True)
 
 
 @app.route("/rip", methods=["POST"])
