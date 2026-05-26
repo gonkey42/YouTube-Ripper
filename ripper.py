@@ -352,6 +352,31 @@ def generate_text(transcript: str, info: MediaInfo) -> Path:
     return text_path
 
 
+def _transcribe_to_text_file(audio_path: Path, info: MediaInfo, url: str):
+    """Transcribe audio and write its transcript, yielding stream events."""
+    yield ("status", "Transcribing with Whisper... (this may take a minute)")
+
+    segments = None
+    for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+        if msg_type == "_done":
+            segments = msg_data
+        else:
+            yield (msg_type, msg_data)
+            if msg_type == "error":
+                return
+
+    yield ("status", "Generating text file...")
+
+    try:
+        transcript = format_transcript(segments, info.title, url)
+        text_path = generate_text(transcript, info)
+    except Exception as e:
+        yield ("error", f"Text generation failed: {e}")
+        return
+
+    yield ("_done", text_path)
+
+
 def _run_video_download_with_progress(url: str, quality: str):
     """Run download_video in a thread, yielding SSE status messages for progress."""
     prog_queue = queue.Queue()
@@ -462,19 +487,18 @@ def process(url: str, mode: str, quality: str = "1080p"):
             return
 
         try:
-            yield ("status", "Transcribing with Whisper... (this may take a minute)")
-            segments = None
-            for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+            text_path = None
+            for msg_type, msg_data in _transcribe_to_text_file(audio_path, downloaded_video.info, url):
                 if msg_type == "_done":
-                    segments = msg_data
+                    text_path = msg_data
                 else:
                     yield (msg_type, msg_data)
                     if msg_type == "error":
                         return
 
-            yield ("status", "Generating text file...")
-            transcript = format_transcript(segments, downloaded_video.info.title, url)
-            text_path = generate_text(transcript, downloaded_video.info)
+            if text_path is None:
+                yield ("error", "Text generation produced no output.")
+                return
         except Exception as e:
             yield ("error", f"Text generation failed: {e}")
             return
@@ -505,26 +529,20 @@ def process(url: str, mode: str, quality: str = "1080p"):
         result["audio"] = audio_path.name
 
     if mode in ("text", "both"):
-        yield ("status", "Transcribing with Whisper... (this may take a minute)")
-
-        segments = None
-        for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+        text_path = None
+        for msg_type, msg_data in _transcribe_to_text_file(audio_path, info, url):
             if msg_type == "_done":
-                segments = msg_data
+                text_path = msg_data
             else:
                 yield (msg_type, msg_data)
                 if msg_type == "error":
                     return
 
-        yield ("status", "Generating text file...")
-
-        try:
-            transcript = format_transcript(segments, info.title, url)
-            text_path = generate_text(transcript, info)
-            result["text"] = text_path.name
-        except Exception as e:
-            yield ("error", f"Text generation failed: {e}")
+        if text_path is None:
+            yield ("error", "Text generation produced no output.")
             return
+
+        result["text"] = text_path.name
 
     # If text-only, clean up the audio file
     if mode == "text" and audio_path.exists():

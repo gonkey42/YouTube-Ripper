@@ -115,6 +115,24 @@ class TranscriptOutputTests(unittest.TestCase):
 
             self.assertFalse(temp_audio_path.exists())
 
+    def test_transcribe_to_text_file_emits_done_path(self):
+        segments = [SimpleNamespace(text="Hello helper.")]
+        info = ripper.MediaInfo(title="Helper Video", video_id="abc123")
+
+        with TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "audio.m4a"
+            audio_path.touch()
+
+            with (
+                patch.object(ripper, "OUTPUT_DIR", Path(temp_dir)),
+                patch.object(ripper, "_run_transcription_with_keepalive", return_value=[("_done", segments)]),
+            ):
+                events = list(ripper._transcribe_to_text_file(audio_path, info, "https://youtu.be/abc123"))
+
+        self.assertIn(("status", "Transcribing with Whisper... (this may take a minute)"), events)
+        self.assertIn(("status", "Generating text file..."), events)
+        self.assertIn(("_done", Path(temp_dir) / "Helper Video [abc123].txt"), events)
+
 
 if __name__ == "__main__":
     unittest.main()
