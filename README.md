@@ -72,6 +72,7 @@ In "Text Only" mode, the downloaded audio file is automatically deleted after tr
 - First run downloads the Whisper `base` model (~150MB)
 - No database, no accounts, no cloud services
 - Port: 4039
+- The server binds to `0.0.0.0` for Tailscale reachability, but requests are accepted only from loopback and Tailscale client ranges by default.
 - YouTube downloads use your local Chrome `Profile 1` cookies by default to avoid bot/sign-in checkpoints.
 - To override auth, set `YOUTUBE_RIPPER_COOKIES_FROM_BROWSER`, for example `firefox:default`, or set `YOUTUBE_RIPPER_COOKIES` to a Netscape-format cookies file.
 
@@ -84,6 +85,7 @@ Optional environment variables:
 | `YOUTUBE_RIPPER_OUTPUT_DIR` | `output/` | Directory for generated files |
 | `YOUTUBE_RIPPER_HOST` | `0.0.0.0` | Flask bind host |
 | `YOUTUBE_RIPPER_PORT` | `4039` | Flask port |
+| `YOUTUBE_RIPPER_ALLOWED_CLIENTS` | `127.0.0.0/8,::1/128,100.64.0.0/10,fd7a:115c:a1e0::/48` | Comma-separated allowed client IPs/CIDR ranges |
 | `YOUTUBE_RIPPER_WHISPER_MODEL` | `base` | faster-whisper model name |
 | `YOUTUBE_RIPPER_WHISPER_DEVICE` | `cpu` | faster-whisper device |
 | `YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE` | `int8` | faster-whisper compute type |
