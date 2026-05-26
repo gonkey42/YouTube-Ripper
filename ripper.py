@@ -11,6 +11,7 @@ from glob import escape as glob_escape
 from pathlib import Path
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output"
 
@@ -128,9 +129,12 @@ def _parse_cookies_from_browser(value: str) -> tuple[str, str | None, str | None
     return (browser, profile, None, None)
 
 
-def _yt_dlp_opts(extra_opts: dict | None = None) -> dict:
+def _yt_dlp_opts(extra_opts: dict | None = None, *, use_cookies: bool = True) -> dict:
     """Build common yt-dlp options, including YouTube auth cookies."""
     opts = dict(extra_opts or {})
+
+    if not use_cookies:
+        return opts
 
     cookie_file = (
         os.environ.get("YOUTUBE_RIPPER_COOKIES")
@@ -152,11 +156,30 @@ def _yt_dlp_opts(extra_opts: dict | None = None) -> dict:
     return opts
 
 
+def _has_cookie_options(opts: dict) -> bool:
+    return "cookiefile" in opts or "cookiesfrombrowser" in opts
+
+
+def _run_ytdlp_with_cookie_fallback(base_opts: dict, action):
+    opts = _yt_dlp_opts(base_opts)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return action(ydl)
+    except DownloadError:
+        if not _has_cookie_options(opts):
+            raise
+        retry_opts = _yt_dlp_opts(base_opts, use_cookies=False)
+        with yt_dlp.YoutubeDL(retry_opts) as ydl:
+            return action(ydl)
+
+
 def _fetch_media_info(url: str) -> MediaInfo:
     """Fetch title and id without downloading media."""
-    info_opts = _yt_dlp_opts({"quiet": True, "no_warnings": True, "skip_download": True})
-    with yt_dlp.YoutubeDL(info_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    base_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    info = _run_ytdlp_with_cookie_fallback(
+        base_opts,
+        lambda ydl: ydl.extract_info(url, download=False),
+    )
 
     return MediaInfo(
         title=info.get("title", "Untitled"),
@@ -198,7 +221,7 @@ def download_video(
             progress_queue.put({"status": "merging"})
 
     fmt = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])
-    dl_opts = _yt_dlp_opts({
+    dl_opts = {
         "format": fmt,
         "merge_output_format": "mp4",
         "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
@@ -206,9 +229,8 @@ def download_video(
         "postprocessor_hooks": [postprocessor_hook],
         "quiet": True,
         "no_warnings": True,
-    })
-    with yt_dlp.YoutubeDL(dl_opts) as ydl:
-        ydl.download([url])
+    }
+    _run_ytdlp_with_cookie_fallback(dl_opts, lambda ydl: ydl.download([url]))
 
     return DownloadedMedia(path=output_path, info=info)
 
@@ -259,7 +281,7 @@ def download_audio(url: str) -> DownloadedMedia:
     output_stem = _output_stem(info)
     output_path = OUTPUT_DIR / f"{output_stem}.m4a"
 
-    dl_opts = _yt_dlp_opts({
+    dl_opts = {
         "format": "bestaudio[ext=m4a]/bestaudio",
         "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
         "postprocessors": [
@@ -270,9 +292,8 @@ def download_audio(url: str) -> DownloadedMedia:
         ],
         "quiet": True,
         "no_warnings": True,
-    })
-    with yt_dlp.YoutubeDL(dl_opts) as ydl:
-        ydl.download([url])
+    }
+    _run_ytdlp_with_cookie_fallback(dl_opts, lambda ydl: ydl.download([url]))
 
     # Find the actual output file (extension may vary depending on source)
     if not output_path.exists():

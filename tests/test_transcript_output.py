@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import ripper
+from yt_dlp.utils import DownloadError
 
 
 class TranscriptOutputTests(unittest.TestCase):
@@ -43,6 +44,42 @@ class TranscriptOutputTests(unittest.TestCase):
 
         self.assertEqual(downloaded.path, fallback_path)
         self.assertEqual(downloaded.info, info)
+
+    def test_download_audio_retries_without_cookies_after_cookie_download_failure(self):
+        info = ripper.MediaInfo(title="Example Video", video_id="abc123")
+        seen_opts = []
+
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            output_path = output_dir / "Example Video [abc123].m4a"
+
+            class FakeYoutubeDL:
+                def __init__(self, opts):
+                    seen_opts.append(opts)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def download(self, urls):
+                    if len(seen_opts) == 1:
+                        raise DownloadError("ERROR: [youtube] abc123: No video formats found!")
+                    output_path.touch()
+
+            with (
+                patch.object(ripper, "OUTPUT_DIR", output_dir),
+                patch.object(ripper, "_fetch_media_info", return_value=info),
+                patch.object(ripper.yt_dlp, "YoutubeDL", FakeYoutubeDL),
+                patch.dict("os.environ", {"YOUTUBE_RIPPER_COOKIES_FROM_BROWSER": "chrome:Profile 1"}, clear=True),
+            ):
+                downloaded = ripper.download_audio("https://youtu.be/abc123")
+
+        self.assertEqual(downloaded.path, output_path)
+        self.assertIn("cookiesfrombrowser", seen_opts[0])
+        self.assertNotIn("cookiesfrombrowser", seen_opts[1])
+        self.assertNotIn("cookiefile", seen_opts[1])
 
     def test_text_mode_returns_text_file_result(self):
         segments = [SimpleNamespace(text="Hello world.")]
