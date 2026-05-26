@@ -1,6 +1,7 @@
 import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from subprocess import CalledProcessError
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -96,6 +97,23 @@ class TranscriptOutputTests(unittest.TestCase):
         extract_audio.assert_called_once_with(video_path)
         self.assertFalse(temp_audio_path.exists())
         self.assertIn(("result", {"video": "Example Video [abc123].mp4", "text": "Example Video [abc123].txt"}), events)
+
+    def test_extract_audio_from_video_cleans_partial_file_on_ffmpeg_failure(self):
+        with TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir) / "Example Video [abc123].mp4"
+            video_path.write_bytes(b"video")
+            temp_audio_path = Path(temp_dir) / "Example Video [abc123].transcription.m4a"
+            temp_audio_path.write_bytes(b"partial")
+
+            with patch.object(
+                ripper.subprocess,
+                "run",
+                side_effect=CalledProcessError(1, ["ffmpeg"], stderr="failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "ffmpeg audio extraction failed"):
+                    ripper.extract_audio_from_video(video_path)
+
+            self.assertFalse(temp_audio_path.exists())
 
 
 if __name__ == "__main__":

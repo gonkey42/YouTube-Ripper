@@ -216,6 +216,11 @@ def download_video(
 def extract_audio_from_video(video_path: Path) -> Path:
     """Extract temporary audio from a downloaded video for transcription."""
     audio_path = video_path.with_name(f"{video_path.stem}.transcription.m4a")
+
+    def _remove_partial_audio():
+        if audio_path.exists():
+            audio_path.unlink()
+
     cmd = [
         "ffmpeg",
         "-y",
@@ -238,8 +243,10 @@ def extract_audio_from_video(video_path: Path) -> Path:
             text=True,
         )
     except FileNotFoundError as exc:
+        _remove_partial_audio()
         raise RuntimeError("ffmpeg is required to extract audio from downloaded video.") from exc
     except subprocess.CalledProcessError as exc:
+        _remove_partial_audio()
         message = (exc.stderr or exc.stdout or str(exc)).strip()
         raise RuntimeError(f"ffmpeg audio extraction failed: {message}") from exc
 
