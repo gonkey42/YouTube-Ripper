@@ -6,6 +6,7 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from glob import escape as glob_escape
 from pathlib import Path
 
 import yt_dlp
@@ -235,7 +236,7 @@ def download_audio(url: str) -> DownloadedMedia:
     # Find the actual output file (extension may vary depending on source)
     if not output_path.exists():
         # Look for any audio file with the sanitized name
-        candidates = list(OUTPUT_DIR.glob(f"{output_stem}.*"))
+        candidates = list(OUTPUT_DIR.glob(f"{glob_escape(output_stem)}.*"))
         audio_exts = {".m4a", ".webm", ".opus", ".mp3", ".ogg", ".wav"}
         for candidate in candidates:
             if candidate.suffix.lower() in audio_exts:

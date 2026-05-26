@@ -24,6 +24,25 @@ class TranscriptOutputTests(unittest.TestCase):
         self.assertEqual(text_path.name, "Example Video [abc123].txt")
         self.assertEqual(text_content, "hello\n")
 
+    def test_download_audio_fallback_matches_bracketed_video_id_literal(self):
+        info = ripper.MediaInfo(title="Example Video", video_id="abc123")
+
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            fallback_path = output_dir / "Example Video [abc123].opus"
+            fallback_path.touch()
+
+            with (
+                patch.object(ripper, "OUTPUT_DIR", output_dir),
+                patch.object(ripper, "_fetch_media_info", return_value=info),
+                patch.object(ripper.yt_dlp, "YoutubeDL") as youtube_dl,
+            ):
+                youtube_dl.return_value.__enter__.return_value.download.return_value = None
+                downloaded = ripper.download_audio("https://youtu.be/abc123")
+
+        self.assertEqual(downloaded.path, fallback_path)
+        self.assertEqual(downloaded.info, info)
+
     def test_text_mode_returns_text_file_result(self):
         segments = [SimpleNamespace(text="Hello world.")]
 
