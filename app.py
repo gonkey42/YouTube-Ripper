@@ -1,7 +1,9 @@
 """Flask server for YouTube Ripper with SSE streaming."""
 
 import json
+import os
 import re
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 
 from flask import Flask, Response, abort, render_template, request, send_from_directory
@@ -9,11 +11,47 @@ from flask import Flask, Response, abort, render_template, request, send_from_di
 import ripper
 
 app = Flask(__name__)
+DEFAULT_ALLOWED_CLIENTS = "127.0.0.0/8,::1/128,100.64.0.0/10,fd7a:115c:a1e0::/48"
 
 # Simple URL validation: must look like a YouTube URL
 YT_PATTERN = re.compile(
     r"^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)[\w\-]+"
 )
+
+
+def _allowed_client_networks():
+    configured = os.environ.get("YOUTUBE_RIPPER_ALLOWED_CLIENTS", DEFAULT_ALLOWED_CLIENTS)
+    networks = []
+    for item in configured.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
+def _remote_addr_allowed(remote_addr: str | None) -> bool:
+    if not remote_addr:
+        return False
+
+    try:
+        addr = ip_address(remote_addr)
+    except ValueError:
+        return False
+
+    if getattr(addr, "ipv4_mapped", None):
+        addr = addr.ipv4_mapped
+
+    return any(addr in network for network in _allowed_client_networks())
+
+
+@app.before_request
+def restrict_clients():
+    if not _remote_addr_allowed(request.remote_addr):
+        abort(403)
 
 
 @app.route("/")
@@ -69,8 +107,6 @@ def rip():
 
 
 if __name__ == "__main__":
-    import os
-
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     host = os.environ.get("YOUTUBE_RIPPER_HOST", "0.0.0.0")
     port = int(os.environ.get("YOUTUBE_RIPPER_PORT", "4039"))
