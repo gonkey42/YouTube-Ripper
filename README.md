@@ -57,7 +57,7 @@ FLASK_DEBUG=1 uv run python app.py
 
 ## Output
 
-Files are saved to `output/` by default (gitignored). The UI shows clickable saved-file links after each run, so you can download or open the generated files directly from the browser.
+Files are saved to `output/` by default (gitignored). The UI shows clickable saved-file links after each run, so you can download the generated files directly from the browser.
 
 Generated filenames include the YouTube id to avoid collisions between same-title videos:
 
