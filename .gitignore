@@ -9,3 +9,4 @@ wheels/
 .venv/
 *.plist
 !*.plist.example
+.DS_Store

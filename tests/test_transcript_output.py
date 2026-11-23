@@ -2,7 +2,7 @@ import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from subprocess import CalledProcessError
-from types import SimpleNamespace
+from media_types import Transcript, TranscriptSegment, TranscriptionOptions
 from unittest.mock import patch
 
 import ripper
@@ -10,6 +10,11 @@ from yt_dlp.utils import DownloadError
 
 
 class TranscriptOutputTests(unittest.TestCase):
+    def setUp(self):
+        check = patch.object(ripper, "dependency_issues", return_value=[])
+        check.start()
+        self.addCleanup(check.stop)
+
     def test_output_stem_includes_video_id(self):
         info = ripper.MediaInfo(title="Example: Video?", video_id="abc123")
 
@@ -20,26 +25,27 @@ class TranscriptOutputTests(unittest.TestCase):
 
         with TemporaryDirectory() as temp_dir:
             with patch.object(ripper, "OUTPUT_DIR", Path(temp_dir)):
-                text_path = ripper.generate_text("hello\n", info)
+                files = ripper._write_transcript(Transcript((TranscriptSegment(0, 1, "hello"),), "en", "Local Whisper"), info, "https://youtu.be/abc123", TranscriptionOptions())
+                text_path = Path(temp_dir) / files["text"]
                 text_content = text_path.read_text(encoding="utf-8")
 
         self.assertEqual(text_path.name, "Example Video [abc123].txt")
-        self.assertEqual(text_content, "hello\n")
+        self.assertIn("hello\n", text_content)
 
-    def test_download_audio_fallback_matches_bracketed_video_id_literal(self):
+    def test_download_audio_uses_reported_path_with_bracketed_video_id(self):
         info = ripper.MediaInfo(title="Example Video", video_id="abc123")
 
         with TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
             fallback_path = output_dir / "Example Video [abc123].opus"
-            fallback_path.touch()
+            fallback_path.write_bytes(b"audio")
 
             with (
                 patch.object(ripper, "OUTPUT_DIR", output_dir),
                 patch.object(ripper, "_fetch_media_info", return_value=info),
                 patch.object(ripper.yt_dlp, "YoutubeDL") as youtube_dl,
             ):
-                youtube_dl.return_value.__enter__.return_value.download.return_value = None
+                youtube_dl.return_value.__enter__.return_value.extract_info.return_value = {"filepath": str(fallback_path)}
                 downloaded = ripper.download_audio("https://youtu.be/abc123")
 
         self.assertEqual(downloaded.path, fallback_path)
@@ -63,10 +69,11 @@ class TranscriptOutputTests(unittest.TestCase):
                 def __exit__(self, exc_type, exc, traceback):
                     return False
 
-                def download(self, urls):
+                def extract_info(self, url, download):
                     if len(seen_opts) == 1:
                         raise DownloadError("ERROR: [youtube] abc123: No video formats found!")
-                    output_path.touch()
+                    output_path.write_bytes(b"audio")
+                    return {"filepath": str(output_path)}
 
             with (
                 patch.object(ripper, "OUTPUT_DIR", output_dir),
@@ -82,11 +89,11 @@ class TranscriptOutputTests(unittest.TestCase):
         self.assertNotIn("cookiefile", seen_opts[1])
 
     def test_text_mode_returns_text_file_result(self):
-        segments = [SimpleNamespace(text="Hello world.")]
+        segments = Transcript((TranscriptSegment(0, 1, "Hello world."),), "en", "Local Whisper")
 
         with TemporaryDirectory() as temp_dir:
             audio_path = Path(temp_dir) / "example.m4a"
-            audio_path.touch()
+            audio_path.write_bytes(b"audio")
 
             with (
                 patch.object(ripper, "OUTPUT_DIR", Path(temp_dir)),
@@ -102,11 +109,11 @@ class TranscriptOutputTests(unittest.TestCase):
             ):
                 events = list(ripper.process("https://youtu.be/abc123", "text"))
 
-        self.assertIn(("status", "Generating text file..."), events)
+        self.assertIn(("status", "Generating transcript files..."), events)
         self.assertIn(("result", {"text": "Example Video [abc123].txt"}), events)
 
-    def test_video_text_downloads_video_once_and_extracts_temp_audio(self):
-        segments = [SimpleNamespace(text="Hello from video.")]
+    def test_video_text_transcribes_video_directly_without_extra_audio_conversion(self):
+        segments = Transcript((TranscriptSegment(0, 1, "Hello from video."),), "en", "Local Whisper")
 
         with TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -125,14 +132,14 @@ class TranscriptOutputTests(unittest.TestCase):
                 ) as video_download,
                 patch.object(ripper, "download_audio") as audio_download,
                 patch.object(ripper, "extract_audio_from_video", return_value=temp_audio_path) as extract_audio,
-                patch.object(ripper, "_run_transcription_with_keepalive", return_value=[("_done", segments)]),
+                patch.object(ripper, "_run_transcription_with_keepalive", return_value=[("_done", segments)]) as transcribe,
             ):
                 events = list(ripper.process("https://youtu.be/abc123", "video_text"))
 
         video_download.assert_called_once_with("https://youtu.be/abc123", "1080p")
         audio_download.assert_not_called()
-        extract_audio.assert_called_once_with(video_path)
-        self.assertFalse(temp_audio_path.exists())
+        extract_audio.assert_not_called()
+        transcribe.assert_called_once_with(video_path, TranscriptionOptions())
         self.assertIn(("result", {"video": "Example Video [abc123].mp4", "text": "Example Video [abc123].txt"}), events)
 
     def test_extract_audio_from_video_cleans_partial_file_on_ffmpeg_failure(self):
@@ -153,12 +160,12 @@ class TranscriptOutputTests(unittest.TestCase):
             self.assertFalse(temp_audio_path.exists())
 
     def test_transcribe_to_text_file_emits_done_path(self):
-        segments = [SimpleNamespace(text="Hello helper.")]
+        segments = Transcript((TranscriptSegment(0, 1, "Hello helper."),), "en", "Local Whisper")
         info = ripper.MediaInfo(title="Helper Video", video_id="abc123")
 
         with TemporaryDirectory() as temp_dir:
             audio_path = Path(temp_dir) / "audio.m4a"
-            audio_path.touch()
+            audio_path.write_bytes(b"audio")
 
             with (
                 patch.object(ripper, "OUTPUT_DIR", Path(temp_dir)),
@@ -166,9 +173,9 @@ class TranscriptOutputTests(unittest.TestCase):
             ):
                 events = list(ripper._transcribe_to_text_file(audio_path, info, "https://youtu.be/abc123"))
 
-        self.assertIn(("status", "Transcribing with Whisper... (this may take a minute)"), events)
-        self.assertIn(("status", "Generating text file..."), events)
-        self.assertIn(("_done", Path(temp_dir) / "Helper Video [abc123].txt"), events)
+        self.assertTrue(any(kind == "status" and text.startswith("Transcribing with") for kind, text in events))
+        self.assertIn(("status", "Generating transcript files..."), events)
+        self.assertIn(("_done", {"text": "Helper Video [abc123].txt"}), events)
 
 
 if __name__ == "__main__":

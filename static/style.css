@@ -94,6 +94,41 @@ input[type="radio"] {
     margin-bottom: 1.5rem;
 }
 
+.transcription-options {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    min-width: 0;
+}
+
+.transcription-options legend {
+    color: #d1d5db;
+    font-size: 0.9rem;
+    padding: 0 0.4rem;
+}
+
+.field-help {
+    color: #9ca3af;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0.5rem 0 1rem;
+}
+
+.dependency-warning {
+    padding: 1rem;
+    margin-bottom: 1rem;
+    border: 1px solid #fbbf24;
+    border-radius: 0.5rem;
+    color: #fbbf24;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.dependency-warning ul {
+    padding-left: 1.2rem;
+}
+
 select {
     width: 100%;
     padding: 0.75rem 1rem;

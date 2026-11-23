@@ -1,13 +1,29 @@
 import os
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import ripper
 from yt_dlp.utils import DownloadError
+
+import ripper
 
 
 class YtDlpOptionsTests(unittest.TestCase):
+    def test_prefers_current_homebrew_node_for_youtube_challenges(self):
+        with TemporaryDirectory() as temp_dir:
+            node_path = Path(temp_dir) / "node"
+            node_path.touch()
+            node_path.chmod(0o755)
+
+            with (
+                patch.object(ripper, "HOMEBREW_NODE_PATH", node_path, create=True),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                opts = ripper._yt_dlp_opts()
+
+        self.assertEqual(opts["js_runtimes"], {"node": {"path": str(node_path)}})
+
     def test_uses_cookie_file_when_configured(self):
         with patch.dict(
             os.environ,
@@ -81,7 +97,7 @@ class YtDlpOptionsTests(unittest.TestCase):
 
     def test_whisper_settings_use_environment_defaults(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(ripper._whisper_model_name(), "base")
+            self.assertEqual(ripper._whisper_model_name(), "turbo")
             self.assertEqual(ripper._whisper_device(), "cpu")
             self.assertEqual(ripper._whisper_compute_type(), "int8")
 
