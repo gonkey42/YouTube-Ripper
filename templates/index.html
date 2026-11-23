@@ -50,20 +50,7 @@
                     <option value="captions">Use YouTube captions when available</option>
                     <option value="local">Transcribe locally</option>
                 </select>
-                <p class="field-help" id="source-help">If English captions are unavailable, your selected engine transcribes locally. Text Only skips the media download when captions are found.</p>
-                <label class="field-label" for="transcription-backend">Transcription engine</label>
-                <select id="transcription-backend">
-                    <option value="mlx" selected>Apple MLX</option>
-                    <option value="faster-whisper">faster-whisper</option>
-                </select>
-                <p class="field-help">Apple MLX uses your Mac's GPU. Local transcription uses English and the engine you choose.</p>
-                <label class="field-label" for="transcription-model">Model</label>
-                <select id="transcription-model">
-                    {% for value, label in transcription_models.items() %}
-                    <option value="{{ value }}">{{ label }}</option>
-                    {% endfor %}
-                </select>
-                <p class="field-help">Larger models need more memory and time. Each model downloads once on first use. Used as fallback when captions are unavailable.</p>
+                <p class="field-help" id="source-help">If English captions are unavailable, the audio is transcribed locally with Whisper Turbo. Text Only skips the media download when captions are found.</p>
             </fieldset>
 
             <button type="submit" class="btn-rip" id="btn-rip">Rip It</button>
@@ -104,9 +91,7 @@
             const mode = document.querySelector('input[name="mode"]:checked').value;
             const quality = document.getElementById('quality').value;
             const transcription = {
-                source: document.getElementById('transcript-source').value,
-                model: document.getElementById('transcription-model').value,
-                backend: document.getElementById('transcription-backend').value
+                source: document.getElementById('transcript-source').value
             };
 
             if (!url) return;

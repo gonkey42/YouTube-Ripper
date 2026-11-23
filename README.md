@@ -8,9 +8,9 @@ Local web utility that extracts audio and video from YouTube, transcribes with W
 - **Video quality selection:** 480p, 720p, 1080p, or Best Available
 - **Audio format:** M4A (AAC) — plays on Mac, Android, iOS
 - **Video format:** MP4 with merged audio
-- **Transcription:** Apple MLX selected by default in the web interface, with faster-whisper available as the other engine choice. Media stays local during transcription.
-- **Captions first:** The UI tries uploaded YouTube captions, then automatic English captions, with the selected local engine as fallback. Select Transcribe locally to always transcribe the audio.
-- **Transcript controls:** English transcription, Apple MLX or faster-whisper engine selection, and model selection.
+- **Transcription:** Whisper Turbo, run locally. It is the only model. The app uses MLX on Apple Silicon and faster-whisper on other machines. Media stays local during transcription.
+- **Captions first:** The UI tries uploaded YouTube captions, then automatic English captions, and falls back to local transcription. Select Transcribe locally to always transcribe the audio.
+- **Transcript controls:** One setting, the transcript source. Transcription is in English.
 - **Text output:** Clean `.txt` transcript with title, source URL, transcript source, language, and paragraph breaks.
 - **Real-time progress** via Server-Sent Events, including audio/video download percentage, speed, ETA, and keepalives during processing.
 - **Download checks:** Saved-file links use the actual final extension, and missing or empty downloads report an error.
@@ -55,7 +55,7 @@ FLASK_DEBUG=1 uv run python app.py
 | Component | Tool |
 |-----------|------|
 | YouTube download | yt-dlp |
-| Transcription | MLX Whisper on Apple Silicon; faster-whisper elsewhere; Turbo model by default |
+| Transcription | Whisper Turbo, with MLX Whisper on Apple Silicon and faster-whisper elsewhere |
 | Text generation | Python pathlib |
 | Web server | Flask |
 | Frontend | Vanilla HTML/CSS/JS |
@@ -76,9 +76,9 @@ The web form saves TXT transcripts for text modes. SRT/VTT export remains availa
 
 ## Transcription speed
 
-The web interface offers two engines: Apple MLX, selected by default, and faster-whisper. Apple MLX uses the Apple GPU. The engine does not switch automatically based on the video; an MLX error is reported rather than silently switching to faster-whisper. Both engines run Whisper speech models locally, so choosing Transcribe locally does not force the faster-whisper engine.
+Turbo is the only model. There is no engine or model menu. The app picks the engine automatically. It uses MLX on the Apple GPU on Apple Silicon and faster-whisper on other machines. Set `YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND` to `mlx` or `faster-whisper` to override that choice. The setting applies to every request, including requests from the web interface. The engine never switches during a job. If MLX fails, the app reports the error and does not fall back to faster-whisper.
 
-Turbo is the default model. Larger models require more memory and can be slower. A model downloads on first use and stays cached for reuse. Each process keeps one active model, so changing engines or models requires loading it again. faster-whisper uses voice activity detection; MLX uses its native no-speech filtering.
+The model downloads from Hugging Face on first use and stays on disk after that. The app unloads the model and releases its GPU memory when each job ends, so the server does not hold several gigabytes between jobs. Each job reloads the model, which takes a few seconds. faster-whisper uses voice activity detection. MLX uses its native no-speech filtering.
 
 Choose captions when speed matters most. Choose Transcribe locally when you want a fresh transcription of the audio. English is supplied explicitly, avoiding language detection.
 
@@ -97,7 +97,7 @@ uv sync --locked
 
 ## Notes
 
-- First local transcription downloads the selected Whisper model from Hugging Face. Model size varies by engine and model.
+- The first local transcription downloads the Whisper Turbo model from Hugging Face. The download is about 1.5 GB for MLX.
 - No database, application accounts, or cloud transcription service.
 - Port: 4039
 - The server binds to `0.0.0.0` for Tailscale reachability, but requests are accepted only from loopback and Tailscale client ranges by default.
@@ -114,11 +114,10 @@ Optional environment variables:
 | `YOUTUBE_RIPPER_HOST` | `0.0.0.0` | Flask bind host |
 | `YOUTUBE_RIPPER_PORT` | `4039` | Flask port |
 | `YOUTUBE_RIPPER_ALLOWED_CLIENTS` | `127.0.0.0/8,::1/128,100.64.0.0/10,fd7a:115c:a1e0::/48` | Comma-separated allowed client IPs/CIDR ranges |
-| `YOUTUBE_RIPPER_WHISPER_MODEL` | `turbo` | Default model name for the selected engine |
-| `YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND` | `auto` | Used only by API/internal callers requesting `auto`; the web interface sends an explicit engine and overrides this setting |
+| `YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND` | `auto` | Transcription engine for every request, including the web interface. One of `auto`, `mlx`, or `faster-whisper` |
 | `YOUTUBE_RIPPER_WHISPER_DEVICE` | `cpu` | Device for the faster-whisper backend only |
 | `YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE` | `int8` | Compute type for the faster-whisper backend only |
 | `YOUTUBE_RIPPER_COOKIES_FROM_BROWSER` | `chrome:Profile 1` | Browser cookies source for yt-dlp |
 | `YOUTUBE_RIPPER_COOKIES` | unset | Netscape-format cookies file path |
 
-The UI model selector overrides `YOUTUBE_RIPPER_WHISPER_MODEL`. MLX supports `tiny`, `base`, `small`, `medium`, `large-v3`, and `turbo`; custom faster-whisper models require selecting that backend.
+`auto` selects MLX on Apple Silicon and faster-whisper elsewhere. Setting `mlx` on any other machine is an error.

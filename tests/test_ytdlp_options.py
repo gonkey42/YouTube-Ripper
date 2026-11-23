@@ -95,12 +95,6 @@ class YtDlpOptionsTests(unittest.TestCase):
         with patch.dict(os.environ, {"YOUTUBE_RIPPER_OUTPUT_DIR": "/tmp/ripper-output"}, clear=True):
             self.assertEqual(ripper._configured_output_dir(), Path("/tmp/ripper-output"))
 
-    def test_whisper_settings_use_environment_defaults(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(ripper._whisper_model_name(), "turbo")
-            self.assertEqual(ripper._whisper_device(), "cpu")
-            self.assertEqual(ripper._whisper_compute_type(), "int8")
-
 
 if __name__ == "__main__":
     unittest.main()

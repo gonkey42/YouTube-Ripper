@@ -1,6 +1,8 @@
 """Local speech recognition and plain-text/subtitle transcript exports."""
 
+import gc
 import html
+import logging
 import math
 import os
 import platform
@@ -12,114 +14,112 @@ from pathlib import Path
 from media_types import Transcript, TranscriptSegment, TranscriptionOptions
 
 
-# Both backends share one lock and release their cached model when switching.
-# Faster-whisper inference happens while iterating its lazy segment results.
+logger = logging.getLogger(__name__)
+
+# One transcription runs at a time. No model is cached between jobs, so the
+# memory a job uses is returned when the job ends.
 _model_lock = threading.Lock()
-_model = None
-_model_key: tuple[str, str, str] | None = None
-_mlx_model_holder = None
 
-MLX_MODELS = {
-    "tiny": "mlx-community/whisper-tiny-mlx",
-    "base": "mlx-community/whisper-base-mlx",
-    "small": "mlx-community/whisper-small-mlx",
-    "medium": "mlx-community/whisper-medium-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
-    "turbo": "mlx-community/whisper-large-v3-turbo",
-}
+MODEL_NAME = "turbo"
+MLX_MODEL_REPO = "mlx-community/whisper-large-v3-turbo"
 
 
-def resolve_backend(options: TranscriptionOptions) -> str:
-    """Select the explicit backend, environment override, or platform default."""
-    backend = options.backend
-    if backend == "auto":
-        backend = os.environ.get("YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND", "auto")
+def resolve_backend() -> str:
+    """Select the environment override or the platform default engine."""
+    backend = os.environ.get("YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND", "auto")
     if backend not in {"auto", "mlx", "faster-whisper"}:
         raise ValueError("Transcription backend must be auto, mlx, or faster-whisper")
     apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
     if backend == "auto":
         return "mlx" if apple_silicon else "faster-whisper"
     if backend == "mlx" and not apple_silicon:
-        raise RuntimeError("MLX requires an Apple Silicon Mac. Select the faster-whisper backend on this machine.")
+        raise RuntimeError(
+            "MLX requires an Apple Silicon Mac. "
+            "Set YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND=faster-whisper on this machine."
+        )
     return backend
 
 
-def _transcribe_mlx(filepath: Path, options: TranscriptionOptions, model_name: str) -> Transcript:
-    """Use upstream's single-model cache while holding our shared model lock."""
-    global _model, _model_key, _mlx_model_holder
-    if model_name not in MLX_MODELS:
-        raise ValueError(f"MLX model must be one of: {', '.join(MLX_MODELS)}")
+def _transcribe_mlx(filepath: Path, options: TranscriptionOptions) -> Transcript:
+    """Run MLX Whisper Turbo, then unload the model and free its GPU memory."""
     try:
+        import mlx.core as mx
         import mlx_whisper
         from mlx_whisper.transcribe import ModelHolder
     except (ImportError, OSError) as error:
         raise RuntimeError(
             "MLX Whisper could not load. Run 'uv sync --locked' on an Apple Silicon Mac, "
-            "then retry, or select the faster-whisper backend."
+            "then retry, or set YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND=faster-whisper."
         ) from error
 
-    repo = MLX_MODELS[model_name]
-    _model = None
-    _model_key = None
-    _mlx_model_holder = ModelHolder
-    if ModelHolder.model_path != repo:
-        ModelHolder.model = None
-        ModelHolder.model_path = None
-
+    failure = None
+    segments = language = None
     try:
         result = mlx_whisper.transcribe(
             str(filepath),
-            path_or_hf_repo=repo,
+            path_or_hf_repo=MLX_MODEL_REPO,
             language=options.language,
             verbose=None,
         )
+        segments = tuple(
+            TranscriptSegment(start=float(segment["start"]), end=float(segment["end"]), text=segment["text"].strip())
+            for segment in result["segments"]
+        )
+        language = result.get("language")
+        del result
     except Exception as error:
-        raise RuntimeError(
+        # Log the stack here. The error raised to the caller is unchained.
+        logger.exception("MLX transcription failed")
+        failure = RuntimeError(
             f"MLX transcription failed: {error}. Check that ffmpeg is available and "
-            "the selected model can download from Hugging Face, or select the faster-whisper backend."
-        ) from error
-    segments = tuple(
-        TranscriptSegment(start=float(segment["start"]), end=float(segment["end"]), text=segment["text"].strip())
-        for segment in result["segments"]
+            "the model can download from Hugging Face, or set "
+            "YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND=faster-whisper."
+        )
+
+    # Release here, after the except block has ended, and not in a finally.
+    # While an exception is propagating, its traceback frames still reference
+    # the model, so a release at that point frees nothing. The failure is kept
+    # as a new, unchained error for the same reason.
+    try:
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+        gc.collect()
+        mx.clear_cache()
+    except Exception:
+        logger.exception("Could not release MLX model memory after transcription")
+
+    if failure is not None:
+        raise failure
+    return Transcript(segments=segments, language=language, source="Local Whisper (MLX)")
+
+
+def _transcribe_faster_whisper(filepath: Path, options: TranscriptionOptions) -> Transcript:
+    """Run faster-whisper with a model that lives only for this call."""
+    from faster_whisper import WhisperModel
+
+    model = WhisperModel(
+        MODEL_NAME,
+        device=os.environ.get("YOUTUBE_RIPPER_WHISPER_DEVICE", "cpu"),
+        compute_type=os.environ.get("YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE", "int8"),
     )
-    return Transcript(segments=segments, language=result.get("language"), source="Local Whisper (MLX)")
+    segments, info = model.transcribe(
+        str(filepath), beam_size=5, language=options.language, vad_filter=True
+    )
+    # Inference happens while iterating the lazy segments, so finish it here.
+    timed_segments = tuple(
+        TranscriptSegment(start=float(seg.start), end=float(seg.end), text=seg.text.strip())
+        for seg in segments
+    )
+    return Transcript(segments=timed_segments, language=info.language, source="Local Whisper")
 
 
 def transcribe(filepath: Path, options: TranscriptionOptions) -> Transcript:
     """Transcribe locally and retain segment times and the detected language."""
-    global _model, _model_key
-
-    model_name = options.model or os.environ.get("YOUTUBE_RIPPER_WHISPER_MODEL", "turbo")
-    backend = resolve_backend(options)
-    device = os.environ.get("YOUTUBE_RIPPER_WHISPER_DEVICE", "cpu")
-    compute_type = os.environ.get("YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE", "int8")
-    key = (model_name, device, compute_type)
-
+    backend = resolve_backend()
     with _model_lock:
         if backend == "mlx":
-            return _transcribe_mlx(filepath, options, model_name)
-        if _mlx_model_holder is not None:
-            _mlx_model_holder.model = None
-            _mlx_model_holder.model_path = None
-        if _model is None or _model_key != key:
-            from faster_whisper import WhisperModel
-
-            # Release the previous model before loading another large model.
-            _model = None
-            _model_key = None
-            _model = WhisperModel(model_name, device=device, compute_type=compute_type)
-            _model_key = key
-
-        segments, info = _model.transcribe(
-            str(filepath), beam_size=5, language=options.language, vad_filter=True
-        )
-        timed_segments = tuple(
-            TranscriptSegment(start=float(seg.start), end=float(seg.end), text=seg.text.strip())
-            for seg in segments
-        )
-        language = info.language
-
-    return Transcript(segments=timed_segments, language=language, source="Local Whisper")
+            return _transcribe_mlx(filepath, options)
+        return _transcribe_faster_whisper(filepath, options)
 
 
 def _plain_text(transcript: Transcript, title: str, url: str) -> str:

@@ -27,18 +27,6 @@ def _configured_output_dir() -> Path:
     return DEFAULT_OUTPUT_DIR
 
 
-def _whisper_model_name() -> str:
-    return os.environ.get("YOUTUBE_RIPPER_WHISPER_MODEL", "turbo")
-
-
-def _whisper_device() -> str:
-    return os.environ.get("YOUTUBE_RIPPER_WHISPER_DEVICE", "cpu")
-
-
-def _whisper_compute_type() -> str:
-    return os.environ.get("YOUTUBE_RIPPER_WHISPER_COMPUTE_TYPE", "int8")
-
-
 OUTPUT_DIR = _configured_output_dir()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -364,12 +352,12 @@ def _transcribe_to_text_file(
 ):
     options = options or TranscriptionOptions()
     try:
-        backend = transcription.resolve_backend(options)
+        backend = transcription.resolve_backend()
     except Exception as exc:
         yield ("error", f"Transcription setup failed: {exc}")
         return
     engine = "MLX on the Apple GPU" if backend == "mlx" else "faster-whisper"
-    yield ("status", f"Transcribing with {engine}... The first use of a model includes its download.")
+    yield ("status", f"Transcribing with {engine}... The first run downloads the model.")
     transcript = None
     for msg_type, msg_data in _run_transcription_with_keepalive(audio_path, options):
         if msg_type == "_done":
@@ -514,7 +502,7 @@ def process(
                 yield ("result", result)
                 return
         else:
-            yield ("status", "No usable captions in the requested language. Transcribing locally with your selected engine.")
+            yield ("status", "No usable captions in the requested language. Transcribing locally.")
 
     # Captions-only requests can succeed without ffmpeg. Check it here too so
     # falling back to a media download gives a useful setup error.
