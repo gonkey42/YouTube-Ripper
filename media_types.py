@@ -19,8 +19,6 @@ class Transcript:
 
 @dataclass(frozen=True)
 class TranscriptionOptions:
-    model: str | None = None
     language: str | None = None
     prefer_captions: bool = False
     subtitle_formats: tuple[str, ...] = ()
-    backend: str = "auto"

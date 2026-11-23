@@ -49,3 +49,11 @@ Restarted `com.claudebot.youtube-ripper` with launchctl at the user's request. T
 The user selected Turbo as the default for both engines. The menu now reads Server default (turbo); explicit model choices and environment overrides remain supported. Historical base-model benchmark results above do not measure Turbo.
 
 The user subsequently requested removal of the Also save subtitles controls. SRT/VTT checkboxes and form submission fields were removed; browser requests now use the existing TXT-only default.
+
+## Turbo only and per-job memory release (2026-11-23)
+
+Turbo is now the only model, and the engine and model menus are gone from the page. `TranscriptionOptions` no longer has `model` or `backend`. The `/rip` endpoint ignores those two settings if a caller still sends them. `YOUTUBE_RIPPER_TRANSCRIPTION_BACKEND` is the only engine override and now applies to web requests too. Nothing reads `YOUTUBE_RIPPER_WHISPER_MODEL` any more. This replaces the engine and model statements in the sections above.
+
+The server used to keep several gigabytes of GPU memory after the first transcription, because mlx_whisper caches the model and MLX keeps a buffer cache. `transcription.py` now clears `ModelHolder`, runs `gc.collect()`, and calls `mx.clear_cache()` after every MLX job, on success and on failure. The release runs after the `except` block has ended. A release inside `finally` frees nothing while the exception is still propagating, because the traceback frames hold the model. faster-whisper creates its model as a local variable for each call. Each job reloads the model, which takes a few seconds.
+
+Verification: `uv run python -m unittest discover -q` runs 107 tests and all pass. A separate process transcribed a 7 second speech clip with the real Turbo model and then a missing file. MLX reported 0.1 MB active and 0.0 MB cached after each call. The peak was about 2040 MB during the successful job and about 1540 MB during the failed one.

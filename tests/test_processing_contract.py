@@ -43,10 +43,10 @@ class ProcessingContractTests(unittest.TestCase):
         self.assertIn(TRANSCRIPT.source, (self.output / files["text"]).read_text())
         self.assertIn("00:00:00,000 --> 00:00:01,250", (self.output / files["srt"]).read_text())
 
-    def test_missing_captions_fall_back_to_selected_engine_and_model(self):
+    def test_missing_captions_fall_back_to_local_transcription(self):
         media = self.output / "audio.m4a"
         media.write_bytes(b"audio")
-        options = TranscriptionOptions(model="small", language="en", prefer_captions=True, backend="faster-whisper")
+        options = TranscriptionOptions(language="en", prefer_captions=True)
         with (
             patch.object(ripper, "fetch_captions", return_value=None),
             patch.object(ripper, "download_audio", return_value=ripper.DownloadedMedia(media, INFO)),
@@ -89,7 +89,7 @@ class ProcessingContractTests(unittest.TestCase):
             patch.object(ripper, "download_audio", return_value=ripper.DownloadedMedia(media, INFO)),
             patch.object(ripper.transcription, "transcribe", side_effect=RuntimeError("model unavailable")),
         ):
-            events = list(ripper.process(URL, "both", options=TranscriptionOptions(backend="faster-whisper")))
+            events = list(ripper.process(URL, "both", options=TranscriptionOptions()))
         self.assertIn(("error", "Transcription failed: model unavailable"), events)
         self.assertFalse(any(kind == "result" for kind, _ in events))
 
@@ -102,36 +102,39 @@ class RequestContractTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_options_reach_processor_and_subtitle_links_reach_stream(self):
-        settings = {"source": "captions", "language": "en", "model": "small", "backend": "mlx", "subtitle_formats": ["srt", "vtt"]}
+        settings = {"source": "captions", "language": "en", "subtitle_formats": ["srt", "vtt"]}
         with patch.object(ripper, "process", return_value=[("result", {"text": "a.txt", "srt": "a.srt", "vtt": "a.vtt"})]) as process:
             response = self.client.post("/rip", json={"url": URL, "mode": "text", "transcription": settings})
             payload = json.loads(response.get_data(as_text=True).removeprefix("data: ").strip())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(payload["data"]), {"text", "srt", "vtt"})
-        process.assert_called_once_with(URL, "text", "1080p", TranscriptionOptions("small", "en", True, ("srt", "vtt"), "mlx"))
+        process.assert_called_once_with(URL, "text", "1080p", TranscriptionOptions("en", True, ("srt", "vtt")))
         self.check.assert_called_once_with(require_ffmpeg=False)
 
     def test_invalid_settings_do_not_start_processing(self):
         with patch.object(ripper, "process") as process:
-            for setting in ({"model": "arbitrary/model"}, {"language": []}, {"backend": "unknown"}, {"subtitle_formats": "srt"}, {"subtitle_formats": ["pdf"]}):
+            for setting in ({"language": []}, {"language": "xx"}, {"source": "cloud"}, {"subtitle_formats": "srt"}, {"subtitle_formats": ["pdf"]}):
                 with self.subTest(setting=setting):
                     response = self.client.post("/rip", json={"url": URL, "transcription": setting})
                     self.assertEqual(response.status_code, 400)
         process.assert_not_called()
 
-    def test_local_source_uses_english_and_the_explicit_engine(self):
-        for backend in (None, "mlx", "faster-whisper"):
-            with self.subTest(backend=backend), patch.object(ripper, "process", return_value=[]) as process:
-                settings = {"source": "local"}
-                if backend is not None:
-                    settings["backend"] = backend
-                response = self.client.post("/rip", json={"url": URL, "mode": "text", "transcription": settings})
-                response.get_data()
-                self.assertEqual(response.status_code, 200)
-                options = process.call_args.args[3]
-                self.assertEqual(options.language, "en")
-                self.assertEqual(options.backend, backend or "mlx")
-                self.assertFalse(options.prefer_captions)
+    def test_removed_model_and_engine_settings_are_accepted_and_ignored(self):
+        settings = {"model": "arbitrary/model", "backend": "unknown"}
+        with patch.object(ripper, "process", return_value=[]) as process:
+            response = self.client.post("/rip", json={"url": URL, "mode": "text", "transcription": settings})
+            response.get_data()
+        self.assertEqual(response.status_code, 200)
+        process.assert_called_once_with(URL, "text", "1080p", TranscriptionOptions(language="en"))
+
+    def test_local_source_uses_english_without_captions(self):
+        with patch.object(ripper, "process", return_value=[]) as process:
+            response = self.client.post("/rip", json={"url": URL, "mode": "text", "transcription": {"source": "local"}})
+            response.get_data()
+        self.assertEqual(response.status_code, 200)
+        options = process.call_args.args[3]
+        self.assertEqual(options.language, "en")
+        self.assertFalse(options.prefer_captions)
 
     def test_dependency_failures_return_actionable_service_error(self):
         self.check.return_value = ["Install ffmpeg"]
@@ -141,18 +144,19 @@ class RequestContractTests(unittest.TestCase):
         self.assertIn("Install ffmpeg", response.get_data(as_text=True))
         process.assert_not_called()
 
-    def test_page_renders_new_controls_and_dependency_warning(self):
+    def test_page_renders_source_control_and_dependency_warning(self):
         self.check.return_value = ["Install Node.js"]
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        for text in ("transcription-backend", "value=\"mlx\"", "Install Node.js"):
-            self.assertIn(text, html)
+        self.assertIn("Install Node.js", html)
+        self.assertIn("transcript-source", html)
+        for text in ("transcription-backend", "transcription-model", 'value="mlx"', "Apple MLX"):
+            self.assertNotIn(text, html)
         self.assertNotIn('subtitle-format', html)
         self.assertNotIn('id="language"', html)
         self.assertNotIn('value="auto"', html)
         self.assertIn('value="local">Transcribe locally', html)
-        self.assertIn('value="mlx" selected>Apple MLX', html)
 
 
 if __name__ == "__main__":

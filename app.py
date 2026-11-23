@@ -14,15 +14,6 @@ import ripper
 
 app = Flask(__name__)
 DEFAULT_ALLOWED_CLIENTS = "127.0.0.0/8,::1/128,100.64.0.0/10,fd7a:115c:a1e0::/48"
-TRANSCRIPTION_MODELS = {
-    "default": "Server default (turbo)",
-    "tiny": "Tiny · fastest",
-    "base": "Base · quick",
-    "small": "Small · balanced",
-    "medium": "Medium · more accurate, slower",
-    "large-v3": "Large v3 · highest accuracy, slowest",
-    "turbo": "Turbo · large model optimized for speed",
-}
 LANGUAGES = {
     "auto": "Auto-detect",
     "en": "English", "es": "Spanish", "fr": "French", "de": "German",
@@ -74,10 +65,7 @@ def restrict_clients():
 
 @app.route("/")
 def index():
-    return render_template(
-        "index.html", dependency_issues=dependency_issues(),
-        transcription_models=TRANSCRIPTION_MODELS,
-    )
+    return render_template("index.html", dependency_issues=dependency_issues())
 
 
 @app.route("/files/<path:filename>")
@@ -120,27 +108,19 @@ def rip():
     settings = data.get("transcription", {})
     if not isinstance(settings, dict):
         return Response("Invalid transcription settings", status=400)
-    model = settings.get("model", "default")
     language = settings.get("language", "en")
     source = settings.get("source", "local")
-    backend = settings.get("backend", "mlx")
     formats = settings.get("subtitle_formats", [])
-    if not isinstance(model, str) or model not in TRANSCRIPTION_MODELS:
-        return Response("Invalid transcription model", status=400)
     if not isinstance(language, str) or language not in LANGUAGES:
         return Response("Invalid transcription language", status=400)
     if source not in ("local", "whisper", "captions"):
         return Response("Invalid transcript source", status=400)
-    if backend not in ("auto", "mlx", "faster-whisper"):
-        return Response("Invalid transcription engine", status=400)
     if not isinstance(formats, list) or any(fmt not in ("srt", "vtt") for fmt in formats):
         return Response("Invalid subtitle formats", status=400)
     options = TranscriptionOptions(
-        model=None if model == "default" else model,
         language=None if language == "auto" else language,
         prefer_captions=source == "captions",
         subtitle_formats=tuple(dict.fromkeys(formats)),
-        backend=backend,
     )
     issues = dependency_issues(require_ffmpeg=not (mode == "text" and options.prefer_captions))
     if issues:
