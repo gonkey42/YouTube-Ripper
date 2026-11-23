@@ -6,14 +6,18 @@ import re
 import subprocess
 import threading
 from dataclasses import dataclass
-from datetime import datetime
-from glob import escape as glob_escape
 from pathlib import Path
 
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+from captions import fetch_captions
+from diagnostics import dependency_issues
+from media_types import Transcript, TranscriptionOptions
+import transcription
+
 DEFAULT_OUTPUT_DIR = Path(__file__).parent / "output"
+HOMEBREW_NODE_PATH = Path("/opt/homebrew/opt/node/bin/node")
 
 
 def _configured_output_dir() -> Path:
@@ -24,7 +28,7 @@ def _configured_output_dir() -> Path:
 
 
 def _whisper_model_name() -> str:
-    return os.environ.get("YOUTUBE_RIPPER_WHISPER_MODEL", "base")
+    return os.environ.get("YOUTUBE_RIPPER_WHISPER_MODEL", "turbo")
 
 
 def _whisper_device() -> str:
@@ -51,23 +55,6 @@ class MediaInfo:
 class DownloadedMedia:
     path: Path
     info: MediaInfo
-
-
-_whisper_model = None
-
-
-def _get_whisper_model():
-    """Lazy-load the faster-whisper model (singleton)."""
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-
-        _whisper_model = WhisperModel(
-            _whisper_model_name(),
-            compute_type=_whisper_compute_type(),
-            device=_whisper_device(),
-        )
-    return _whisper_model
 
 
 def _sanitize_filename(title: str) -> str:
@@ -132,6 +119,9 @@ def _parse_cookies_from_browser(value: str) -> tuple[str, str | None, str | None
 def _yt_dlp_opts(extra_opts: dict | None = None, *, use_cookies: bool = True) -> dict:
     """Build common yt-dlp options, including YouTube auth cookies."""
     opts = dict(extra_opts or {})
+    node_config = {"path": str(HOMEBREW_NODE_PATH)} if os.access(HOMEBREW_NODE_PATH, os.X_OK) else {}
+    opts.setdefault("js_runtimes", {"node": node_config})
+    opts.setdefault("remote_components", ["ejs:github"])
 
     if not use_cookies:
         return opts
@@ -187,52 +177,93 @@ def _fetch_media_info(url: str) -> MediaInfo:
     )
 
 
+def _validate_downloaded_path(path: Path) -> Path:
+    """Require a usable file before announcing a completed download."""
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(
+                f"Download did not produce a nonempty media file: {path.name}. "
+                "Retry the download and check that ffmpeg is installed and the output directory is writable."
+            )
+    except OSError as exc:
+        raise RuntimeError(f"Cannot access downloaded file {path.name}: {exc}") from exc
+    return path
+
+
+def _download_media(url: str, info: MediaInfo, dl_opts: dict, progress_queue=None) -> DownloadedMedia:
+    """Track this download's final path, including extension changes by ffmpeg."""
+    final_paths = []
+
+    def progress_hook(update):
+        if progress_queue is None:
+            return
+        status = update.get("status")
+        if status == "downloading":
+            total = update.get("total_bytes") or update.get("total_bytes_estimate") or 0
+            downloaded = update.get("downloaded_bytes", 0)
+            progress_queue.put({
+                "status": "downloading",
+                "phase": update.get("filename") or update.get("info_dict", {}).get("format_id"),
+                "percent": round(min(100, downloaded / total * 100), 1) if total > 0 else None,
+                "speed": _format_speed(update.get("speed")),
+                "eta": _format_eta(update.get("eta")),
+            })
+        elif status == "finished":
+            progress_queue.put({"status": "finished"})
+
+    def postprocessor_hook(update):
+        processor = update.get("postprocessor", "")
+        # MoveFiles runs after conversion/merging and supplies the final filepath.
+        if update.get("status") == "finished" and processor == "MoveFiles":
+            filepath = update.get("info_dict", {}).get("filepath")
+            if filepath:
+                final_paths.append(filepath)
+        if progress_queue is not None and update.get("status") == "started":
+            progress_queue.put({"status": "merging" if "Merger" in processor else "processing"})
+
+    opts = dict(dl_opts, progress_hooks=[progress_hook], postprocessor_hooks=[postprocessor_hook])
+
+    def download(ydl):
+        # A cookie-free retry must not inherit an earlier attempt's completed path.
+        final_paths.clear()
+        if progress_queue is not None:
+            progress_queue.put({"status": "starting"})
+        return ydl.extract_info(url, download=True)
+
+    result = _run_ytdlp_with_cookie_fallback(opts, download)
+    reported_paths = []
+    if isinstance(result, dict):
+        reported_paths = [
+            item["filepath"] for item in result.get("requested_downloads", [])
+            if isinstance(item, dict) and item.get("filepath")
+        ]
+        if not reported_paths and result.get("filepath"):
+            reported_paths.append(result["filepath"])
+    paths = reported_paths or final_paths
+    if not paths:
+        raise RuntimeError(
+            "yt-dlp reported no completed media file. Retry the download; "
+            "if this continues, update yt-dlp and check ffmpeg."
+        )
+    output_path = _validate_downloaded_path(Path(paths[-1]))
+    return DownloadedMedia(path=output_path, info=info)
+
+
 def download_video(
     url: str,
     quality: str = "1080p",
     progress_queue: queue.Queue | None = None,
 ) -> DownloadedMedia:
-    """Download video from a YouTube URL as MP4."""
+    """Download video, preferring MP4 and preserving the actual final extension."""
     info = _fetch_media_info(url)
-    output_stem = _output_stem(info)
-    output_path = OUTPUT_DIR / f"{output_stem}.mp4"
-
-    def progress_hook(d):
-        if progress_queue is None:
-            return
-        status = d.get("status")
-        if status == "downloading":
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            downloaded = d.get("downloaded_bytes", 0)
-            percent = (downloaded / total * 100) if total > 0 else 0
-            progress_queue.put({
-                "status": "downloading",
-                "percent": round(percent, 1),
-                "speed": _format_speed(d.get("speed")),
-                "eta": _format_eta(d.get("eta")),
-            })
-        elif status == "finished":
-            progress_queue.put({"status": "finished"})
-
-    def postprocessor_hook(d):
-        if progress_queue is None:
-            return
-        if d.get("status") == "started" and "Merger" in d.get("postprocessor", ""):
-            progress_queue.put({"status": "merging"})
-
-    fmt = QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"])
     dl_opts = {
-        "format": fmt,
+        "format": QUALITY_FORMATS.get(quality, QUALITY_FORMATS["1080p"]),
         "merge_output_format": "mp4",
-        "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
-        "progress_hooks": [progress_hook],
-        "postprocessor_hooks": [postprocessor_hook],
+        "outtmpl": str(OUTPUT_DIR / f"{_output_stem(info)}.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
     }
-    _run_ytdlp_with_cookie_fallback(dl_opts, lambda ydl: ydl.download([url]))
-
-    return DownloadedMedia(path=output_path, info=info)
+    return _download_media(url, info, dl_opts, progress_queue)
 
 
 def extract_audio_from_video(video_path: Path) -> Path:
@@ -275,161 +306,139 @@ def extract_audio_from_video(video_path: Path) -> Path:
     return audio_path
 
 
-def download_audio(url: str) -> DownloadedMedia:
-    """Download audio from a YouTube URL as M4A."""
+def download_audio(url: str, progress_queue: queue.Queue | None = None) -> DownloadedMedia:
+    """Download audio as M4A and verify the path reported after conversion."""
     info = _fetch_media_info(url)
-    output_stem = _output_stem(info)
-    output_path = OUTPUT_DIR / f"{output_stem}.m4a"
-
     dl_opts = {
         "format": "bestaudio[ext=m4a]/bestaudio",
-        "outtmpl": str(OUTPUT_DIR / f"{output_stem}.%(ext)s"),
+        "outtmpl": str(OUTPUT_DIR / f"{_output_stem(info)}.%(ext)s"),
         "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "m4a",
-            }
+            {"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}
         ],
         "quiet": True,
         "no_warnings": True,
     }
-    _run_ytdlp_with_cookie_fallback(dl_opts, lambda ydl: ydl.download([url]))
-
-    # Find the actual output file (extension may vary depending on source)
-    if not output_path.exists():
-        # Look for any audio file with the sanitized name
-        candidates = list(OUTPUT_DIR.glob(f"{glob_escape(output_stem)}.*"))
-        audio_exts = {".m4a", ".webm", ".opus", ".mp3", ".ogg", ".wav"}
-        for candidate in candidates:
-            if candidate.suffix.lower() in audio_exts:
-                output_path = candidate
-                break
-
-    return DownloadedMedia(path=output_path, info=info)
+    return _download_media(url, info, dl_opts, progress_queue)
 
 
-def transcribe_audio(filepath: Path):
-    """Transcribe an audio file using faster-whisper. Returns list of segments."""
-    model = _get_whisper_model()
-    segments, _info = model.transcribe(str(filepath), beam_size=5, language="en")
-    return list(segments)
+def _run_with_keepalive(action, status: str, error_prefix: str):
+    """Keep the current response alive during a blocking local or network step."""
+    result = {"value": None, "error": None}
+    done = threading.Event()
 
-
-def _run_transcription_with_keepalive(filepath: Path):
-    """Run transcription in a thread, yielding keepalive SSE messages."""
-    result_holder = {"segments": None, "error": None}
-    done_event = threading.Event()
-
-    def _transcribe():
+    def run():
         try:
-            result_holder["segments"] = transcribe_audio(filepath)
-        except Exception as e:
-            result_holder["error"] = str(e)
+            result["value"] = action()
+        except Exception as exc:
+            result["error"] = str(exc)
         finally:
-            done_event.set()
+            done.set()
 
-    thread = threading.Thread(target=_transcribe, daemon=True)
+    thread = threading.Thread(target=run, daemon=True)
     thread.start()
+    while not done.wait(timeout=3):
+        yield ("status", status)
+    thread.join()
+    if result["error"] is not None:
+        yield ("error", f"{error_prefix}: {result['error']}")
+    else:
+        yield ("_done", result["value"])
 
-    while not done_event.wait(timeout=3):
-        yield ("status", "Still transcribing...")
 
-    thread.join(timeout=5)
+def _run_transcription_with_keepalive(filepath: Path, options: TranscriptionOptions):
+    yield from _run_with_keepalive(
+        lambda: transcription.transcribe(filepath, options),
+        "Still transcribing...", "Transcription failed",
+    )
 
-    if result_holder["error"]:
-        yield ("error", f"Transcription failed: {result_holder['error']}")
+
+def _write_transcript(transcript: Transcript, info: MediaInfo, url: str, options: TranscriptionOptions):
+    return transcription.write_transcript_files(
+        transcript, title=info.title, url=url, stem=_output_stem(info),
+        output_dir=OUTPUT_DIR, subtitle_formats=options.subtitle_formats,
+    )
+
+
+def _transcribe_to_text_file(
+    audio_path: Path, info: MediaInfo, url: str, options: TranscriptionOptions | None = None,
+):
+    options = options or TranscriptionOptions()
+    try:
+        backend = transcription.resolve_backend(options)
+    except Exception as exc:
+        yield ("error", f"Transcription setup failed: {exc}")
         return
-
-    yield ("_done", result_holder["segments"])
-
-
-def format_transcript(segments, title: str, url: str) -> str:
-    """Format transcript segments into a readable plain-text transcript."""
-    full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-
-    if not full_text:
-        full_text = "(No speech detected in this video.)"
-
-    # Split into sentences
-    sentences = re.split(r"(?<=[.!?])\s+", full_text)
-
-    # Group into paragraphs of ~4 sentences each
-    paragraphs = []
-    for i in range(0, len(sentences), 4):
-        chunk = " ".join(sentences[i : i + 4])
-        if chunk.strip():
-            paragraphs.append(chunk.strip())
-
-    date_str = datetime.now().strftime("%B %d, %Y")
-
-    body = "\n\n".join(paragraphs)
-    return f"{title}\n\nSource: {url}\nTranscribed: {date_str}\n\n{body}\n"
-
-
-def generate_text(transcript: str, info: MediaInfo) -> Path:
-    """Write a plain-text transcript."""
-    text_path = OUTPUT_DIR / f"{_output_stem(info)}.txt"
-    text_path.write_text(transcript, encoding="utf-8")
-    return text_path
-
-
-def _transcribe_to_text_file(audio_path: Path, info: MediaInfo, url: str):
-    """Transcribe audio and write its transcript, yielding stream events."""
-    yield ("status", "Transcribing with Whisper... (this may take a minute)")
-
-    segments = None
-    for msg_type, msg_data in _run_transcription_with_keepalive(audio_path):
+    engine = "MLX on the Apple GPU" if backend == "mlx" else "faster-whisper"
+    yield ("status", f"Transcribing with {engine}... The first use of a model includes its download.")
+    transcript = None
+    for msg_type, msg_data in _run_transcription_with_keepalive(audio_path, options):
         if msg_type == "_done":
-            segments = msg_data
+            transcript = msg_data
         else:
             yield (msg_type, msg_data)
             if msg_type == "error":
                 return
-
-    yield ("status", "Generating text file...")
-
-    try:
-        transcript = format_transcript(segments, info.title, url)
-        text_path = generate_text(transcript, info)
-    except Exception as e:
-        yield ("error", f"Text generation failed: {e}")
+    if transcript is None:
+        yield ("error", "Transcription produced no result.")
         return
+    yield ("status", f"Transcript source: {transcript.source}. Language: {transcript.language or 'unknown'}.")
+    yield ("status", "Generating transcript files...")
+    try:
+        files = _write_transcript(transcript, info, url, options)
+    except Exception as exc:
+        yield ("error", f"Text generation failed: {exc}")
+        return
+    yield ("_done", files)
 
-    yield ("_done", text_path)
 
-
-def _run_video_download_with_progress(url: str, quality: str):
-    """Run download_video in a thread, yielding SSE status messages for progress."""
+def _run_download_with_progress(download, media_kind: str):
+    """Yield stream progress, idle keepalives, and only verified completed media."""
     prog_queue = queue.Queue()
     result_holder = {"media": None, "error": None}
 
-    def _download():
+    def run_download():
         try:
-            result_holder["media"] = download_video(url, quality, progress_queue=prog_queue)
-        except Exception as e:
-            result_holder["error"] = str(e)
+            media = download(prog_queue)
+            if media is None:
+                raise RuntimeError("yt-dlp returned no media file. Retry the download.")
+            _validate_downloaded_path(media.path)
+            result_holder["media"] = media
+        except Exception as exc:
+            result_holder["error"] = str(exc)
         finally:
-            prog_queue.put(None)  # sentinel
+            prog_queue.put(None)
 
-    thread = threading.Thread(target=_download, daemon=True)
+    thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
-
-    last_percent = -1
+    last_percent = -2
+    last_phase = None
+    idle_message = f"Still downloading {media_kind}..."
     while True:
         try:
-            update = prog_queue.get(timeout=0.5)
+            update = prog_queue.get(timeout=10)
         except queue.Empty:
+            yield ("status", idle_message)
             continue
-
         if update is None:
             break
-
         status = update.get("status")
-        if status == "downloading":
+        if status == "starting":
+            last_percent = -2
+            last_phase = None
+            idle_message = f"Still downloading {media_kind}..."
+        elif status == "downloading":
             percent = update["percent"]
-            if percent - last_percent >= 2 or percent >= 99:
-                last_percent = percent
-                msg = f"Downloading video... {percent}%"
+            phase = update.get("phase")
+            phase_changed = phase != last_phase
+            if phase_changed or (percent is not None and percent < last_percent):
+                last_percent = -2
+            last_phase = phase
+            idle_message = f"Still downloading {media_kind}..."
+            if percent is None or percent - last_percent >= 2 or percent >= 99:
+                last_percent = percent if percent is not None else -2
+                msg = f"Downloading {media_kind}..."
+                if percent is not None:
+                    msg += f" {percent}%"
                 if update["speed"] != "?":
                     msg += f" ({update['speed']}"
                     if update["eta"] != "?":
@@ -437,138 +446,116 @@ def _run_video_download_with_progress(url: str, quality: str):
                     msg += ")"
                 yield ("status", msg)
         elif status == "merging":
+            idle_message = "Still merging video and audio streams..."
             yield ("status", "Merging video and audio streams...")
+        elif status == "processing":
+            idle_message = f"Still processing {media_kind} with ffmpeg..."
+            yield ("status", f"Processing {media_kind} with ffmpeg...")
         elif status == "finished":
-            yield ("status", "Download complete, finalizing...")
+            last_percent = -2
+            idle_message = "Still finalizing downloaded media..."
+            yield ("status", "Stream downloaded, finalizing...")
 
-    thread.join(timeout=10)
-
+    thread.join()
     if result_holder["error"]:
-        yield ("error", f"Video download failed: {result_holder['error']}")
+        yield ("error", f"{media_kind.capitalize()} download failed: {result_holder['error']}")
         return
-
     media = result_holder["media"]
-
-    if media and media.path.exists():
-        size = _format_bytes(media.path.stat().st_size)
-        yield ("status", f"Video saved: {media.info.title} ({size})")
-
+    size = _format_bytes(media.path.stat().st_size)
+    yield ("status", f"{media_kind.capitalize()} saved: {media.info.title} ({size})")
     yield ("_done", media)
 
 
+def _run_video_download_with_progress(url: str, quality: str):
+    """Run download_video in a thread, yielding SSE status messages for progress."""
+    yield from _run_download_with_progress(
+        lambda progress_queue: download_video(url, quality, progress_queue=progress_queue), "video"
+    )
 
-def process(url: str, mode: str, quality: str = "1080p"):
-    """Main orchestrator. Yields (type, data) tuples for SSE streaming.
 
-    mode: 'audio', 'text', 'both', 'video', or 'video_text'
-    """
-    # --- Video only mode ---
-    if mode == "video":
-        yield ("status", "Fetching video info...")
+def _run_audio_download_with_progress(url: str):
+    """Run download_audio in a thread, yielding SSE status messages for progress."""
+    yield from _run_download_with_progress(
+        lambda progress_queue: download_audio(url, progress_queue=progress_queue), "audio"
+    )
 
-        downloaded_video = None
-        for msg_type, msg_data in _run_video_download_with_progress(url, quality):
-            if msg_type == "_done":
-                downloaded_video = msg_data
-            else:
-                yield (msg_type, msg_data)
-                if msg_type == "error":
-                    return
 
-        if downloaded_video is None:
-            yield ("error", "Video download produced no output.")
-            return
-
-        yield ("status", "Done! Your files are ready.")
-        yield ("result", {"video": downloaded_video.path.name})
-        return
-
-    # --- Video + Text mode ---
-    if mode == "video_text":
-        yield ("status", "Fetching video info...")
-
-        downloaded_video = None
-        for msg_type, msg_data in _run_video_download_with_progress(url, quality):
-            if msg_type == "_done":
-                downloaded_video = msg_data
-            else:
-                yield (msg_type, msg_data)
-                if msg_type == "error":
-                    return
-
-        if downloaded_video is None:
-            yield ("error", "Video download produced no output.")
-            return
-
-        yield ("status", "Extracting audio for transcription...")
-        try:
-            audio_path = extract_audio_from_video(downloaded_video.path)
-        except Exception as e:
-            yield ("error", f"Audio extraction failed: {e}")
-            return
-
-        try:
-            text_path = None
-            for msg_type, msg_data in _transcribe_to_text_file(audio_path, downloaded_video.info, url):
-                if msg_type == "_done":
-                    text_path = msg_data
-                else:
-                    yield (msg_type, msg_data)
-                    if msg_type == "error":
-                        return
-
-            if text_path is None:
-                yield ("error", "Text generation produced no output.")
-                return
-        except Exception as e:
-            yield ("error", f"Text generation failed: {e}")
-            return
-        finally:
-            if audio_path.exists():
-                audio_path.unlink()
-
-        yield ("status", "Done! Your files are ready.")
-        yield ("result", {"video": downloaded_video.path.name, "text": text_path.name})
-        return
-
-    # --- Audio / Text / Both modes (unchanged) ---
-    yield ("status", "Fetching video info and downloading audio...")
-
-    try:
-        downloaded_audio = download_audio(url)
-        audio_path = downloaded_audio.path
-        info = downloaded_audio.info
-    except Exception as e:
-        yield ("error", f"Download failed: {e}")
-        return
-
-    yield ("status", f"Downloaded: {info.title}")
-
+def process(
+    url: str, mode: str, quality: str = "1080p", options: TranscriptionOptions | None = None,
+):
+    """Download requested media and produce transcripts within this request."""
+    options = options or TranscriptionOptions()
+    needs_text = mode in ("text", "both", "video_text")
+    is_video = mode in ("video", "video_text")
+    captions = None
     result = {}
 
-    if mode in ("audio", "both"):
-        result["audio"] = audio_path.name
-
-    if mode in ("text", "both"):
-        text_path = None
-        for msg_type, msg_data in _transcribe_to_text_file(audio_path, info, url):
+    if needs_text and options.prefer_captions:
+        yield ("status", "Checking YouTube captions...")
+        for msg_type, msg_data in _run_with_keepalive(
+            lambda: fetch_captions(url, options.language, _run_ytdlp_with_cookie_fallback),
+            "Still checking YouTube captions...", "Caption lookup failed",
+        ):
             if msg_type == "_done":
-                text_path = msg_data
+                captions = msg_data
+            elif msg_type == "status":
+                yield (msg_type, msg_data)
+        if captions:
+            metadata, transcript = captions
+            info = MediaInfo(title=metadata.get("title", "Untitled"), video_id=metadata.get("id", "unknown"))
+            yield ("status", f"Transcript source: {transcript.source}. Language: {transcript.language or 'unknown'}.")
+            try:
+                result.update(_write_transcript(transcript, info, url, options))
+            except Exception as exc:
+                yield ("error", f"Text generation failed: {exc}")
+                return
+            if mode == "text":
+                yield ("status", "Done! Captions saved without downloading audio or running Whisper.")
+                yield ("result", result)
+                return
+        else:
+            yield ("status", "No usable captions in the requested language. Transcribing locally with your selected engine.")
+
+    # Captions-only requests can succeed without ffmpeg. Check it here too so
+    # falling back to a media download gives a useful setup error.
+    issues = dependency_issues()
+    if issues:
+        yield ("error", "\n".join(issues))
+        return
+    yield ("status", "Fetching video info and downloading media...")
+    download = _run_video_download_with_progress(url, quality) if is_video else _run_audio_download_with_progress(url)
+    media = None
+    for msg_type, msg_data in download:
+        if msg_type == "_done":
+            media = msg_data
+        else:
+            yield (msg_type, msg_data)
+            if msg_type == "error":
+                return
+    if media is None:
+        yield ("error", "Download produced no media file.")
+        return
+    if mode != "text":
+        result["video" if is_video else "audio"] = media.path.name
+
+    if needs_text and not captions:
+        # Both engines decode the audio stream of a video directly. Avoid the
+        # previous extra AAC conversion and temporary audio file.
+        files = None
+        for msg_type, msg_data in _transcribe_to_text_file(media.path, media.info, url, options):
+            if msg_type == "_done":
+                files = msg_data
             else:
                 yield (msg_type, msg_data)
                 if msg_type == "error":
                     return
-
-        if text_path is None:
+        if files is None:
             yield ("error", "Text generation produced no output.")
             return
+        result.update(files)
 
-        result["text"] = text_path.name
-
-    # If text-only, clean up the audio file
-    if mode == "text" and audio_path.exists():
-        audio_path.unlink()
+    if mode == "text" and media.path.exists():
+        media.path.unlink()
         yield ("status", "Audio file cleaned up (text-only mode).")
-
     yield ("status", "Done! Your files are ready.")
     yield ("result", result)

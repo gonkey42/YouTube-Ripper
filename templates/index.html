@@ -11,6 +11,13 @@
         <h1>YouTube Ripper</h1>
         <p class="subtitle">Extract audio, video &amp; transcripts from YouTube</p>
 
+        {% if dependency_issues %}
+        <div class="dependency-warning" role="alert">
+            <p>Some features need setup:</p>
+            <ul>{% for issue in dependency_issues %}<li>{{ issue }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+
         <form id="rip-form">
             <label class="field-label" for="url">YouTube URL</label>
             <input type="text" id="url" name="url" placeholder="Paste YouTube URL here..." autocomplete="off" required>
@@ -36,10 +43,33 @@
                 </select>
             </div>
 
+            <fieldset class="transcription-options" id="transcription-options">
+                <legend>Transcript settings</legend>
+                <label class="field-label" for="transcript-source">Transcript source</label>
+                <select id="transcript-source">
+                    <option value="captions">Use YouTube captions when available</option>
+                    <option value="local">Transcribe locally</option>
+                </select>
+                <p class="field-help" id="source-help">If English captions are unavailable, your selected engine transcribes locally. Text Only skips the media download when captions are found.</p>
+                <label class="field-label" for="transcription-backend">Transcription engine</label>
+                <select id="transcription-backend">
+                    <option value="mlx" selected>Apple MLX</option>
+                    <option value="faster-whisper">faster-whisper</option>
+                </select>
+                <p class="field-help">Apple MLX uses your Mac's GPU. Local transcription uses English and the engine you choose.</p>
+                <label class="field-label" for="transcription-model">Model</label>
+                <select id="transcription-model">
+                    {% for value, label in transcription_models.items() %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <p class="field-help">Larger models need more memory and time. Each model downloads once on first use. Used as fallback when captions are unavailable.</p>
+            </fieldset>
+
             <button type="submit" class="btn-rip" id="btn-rip">Rip It</button>
         </form>
 
-        <div class="progress-area" id="progress-area"></div>
+        <div class="progress-area" id="progress-area" role="status" aria-live="polite"></div>
 
         <div class="downloads" id="downloads">
             <h3>Saved Files</h3>
@@ -54,12 +84,16 @@
         const downloads = document.getElementById('downloads');
         const downloadLinks = document.getElementById('download-links');
         const qualityGroup = document.getElementById('quality-group');
+        const transcriptionOptions = document.getElementById('transcription-options');
 
         // Show/hide quality dropdown for video modes
         document.querySelectorAll('input[name="mode"]').forEach(radio => {
             radio.addEventListener('change', (e) => {
                 const isVideo = e.target.value === 'video' || e.target.value === 'video_text';
                 qualityGroup.style.display = isVideo ? '' : 'none';
+                const hasText = ['text', 'both', 'video_text'].includes(e.target.value);
+                transcriptionOptions.hidden = !hasText;
+                transcriptionOptions.disabled = !hasText;
             });
         });
 
@@ -69,6 +103,11 @@
             const url = document.getElementById('url').value.trim();
             const mode = document.querySelector('input[name="mode"]:checked').value;
             const quality = document.getElementById('quality').value;
+            const transcription = {
+                source: document.getElementById('transcript-source').value,
+                model: document.getElementById('transcription-model').value,
+                backend: document.getElementById('transcription-backend').value
+            };
 
             if (!url) return;
 
@@ -81,12 +120,13 @@
             while (downloadLinks.firstChild) downloadLinks.removeChild(downloadLinks.firstChild);
 
             let lastStatus = null;
+            let receivedTerminalEvent = false;
 
             try {
                 const response = await fetch('/rip', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, mode, quality })
+                    body: JSON.stringify({ url, mode, quality, transcription })
                 });
 
                 if (!response.ok) {
@@ -116,16 +156,18 @@
                             if (msg.type === 'status') {
                                 // In-place update for video download progress
                                 if (lastStatus
-                                    && (msg.data.startsWith('Downloading video...') || msg.data.startsWith('Still transcribing...'))
-                                    && (lastStatus.textContent.startsWith('Downloading video...') || lastStatus.textContent.startsWith('Still transcribing...'))) {
+                                    && isProgressStatus(msg.data)
+                                    && isProgressStatus(lastStatus.textContent)) {
                                     lastStatus.textContent = msg.data;
                                 } else {
                                     if (lastStatus) lastStatus.classList.remove('current');
                                     lastStatus = addStatus(msg.data);
                                 }
                             } else if (msg.type === 'error') {
+                                receivedTerminalEvent = true;
                                 addStatus(msg.data, true);
                             } else if (msg.type === 'result') {
+                                receivedTerminalEvent = true;
                                 showDownloads(msg.data);
                             }
                         } catch (_) {
@@ -133,12 +175,21 @@
                         }
                     }
                 }
+                if (!receivedTerminalEvent) {
+                    addStatus('The connection ended before a result arrived. Check the saved files before retrying.', true);
+                }
             } catch (err) {
                 addStatus('Connection error: ' + err.message, true);
             }
 
             resetButton();
         });
+
+        function isProgressStatus(text) {
+            return text.startsWith('Downloading video...')
+                || text.startsWith('Downloading audio...')
+                || text.startsWith('Still transcribing...');
+        }
 
         function addStatus(text, isError = false) {
             const div = document.createElement('div');
@@ -153,6 +204,8 @@
             if (result.video) files.push(result.video);
             if (result.audio) files.push(result.audio);
             if (result.text) files.push(result.text);
+            if (result.srt) files.push(result.srt);
+            if (result.vtt) files.push(result.vtt);
 
             for (const filename of files) {
                 const div = document.createElement('div');
